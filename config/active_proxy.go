@@ -5,6 +5,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -70,6 +71,33 @@ func (c *Config) loadActiveProxySettings(cfg *Config) error {
 			return fmt.Errorf("failed to parse active_dns_resolver setting, value is not a string")
 		}
 		c.ActiveDNSResolver = strings.TrimSpace(s)
+	}
+	return nil
+}
+
+// UnmarshalJSON ensures the active egress defaults match what CLI operators
+// get from NewConfig when a direct API caller omits the active_strict field.
+// Without this, json.Unmarshal would zero-value ActiveStrict to false and
+// silently weaken the engine's fail-closed posture for API callers.
+//
+// The intended default is true: if "active_strict" is absent in the JSON
+// payload, ActiveStrict is set to true; if the caller explicitly sends
+// "active_strict": false, that value is honored.
+func (c *Config) UnmarshalJSON(data []byte) error {
+	type configAlias Config
+	aux := struct {
+		ActiveStrict *bool `json:"active_strict,omitempty"`
+		*configAlias
+	}{
+		configAlias: (*configAlias)(c),
+	}
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return err
+	}
+	if aux.ActiveStrict != nil {
+		c.ActiveStrict = *aux.ActiveStrict
+	} else {
+		c.ActiveStrict = true
 	}
 	return nil
 }

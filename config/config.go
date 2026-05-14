@@ -116,21 +116,21 @@ type Config struct {
 	// is unaffected and continues to use existing/default networking behavior.
 	// Supported schemes are dependent on the egress profile builder
 	// (typically http://, https:// and socks5://).
-	ActiveProxy string `yaml:"active_proxy,omitempty" json:"-"`
+	ActiveProxy string `yaml:"active_proxy,omitempty" json:"active_proxy,omitempty"`
 
 	// ActiveStrict, when true, causes the engine to refuse to start an active
 	// run that has no ActiveProxy configured (fail-closed). This is the
 	// default to satisfy enterprise egress-segregation policies. Operators
 	// who explicitly want the legacy behavior of routing active traffic out
 	// of the default network can set this to false.
-	ActiveStrict bool `yaml:"active_strict,omitempty" json:"-"`
+	ActiveStrict bool `yaml:"active_strict,omitempty" json:"active_strict"`
 
 	// ActiveDNSResolver is the host:port of the DNS resolver that
 	// active-derived DNS queries (e.g. PTR lookups for active sweeps) are
 	// sent to over the active egress. Empty falls back to the default
 	// (see internal/net.DefaultActiveResolver). Only TCP DNS is used,
 	// because the active egress is typically TCP-only.
-	ActiveDNSResolver string `yaml:"active_dns_resolver,omitempty" json:"-"`
+	ActiveDNSResolver string `yaml:"active_dns_resolver,omitempty" json:"active_dns_resolver,omitempty"`
 
 	// Determines rigidness of the enumeration
 	Rigid bool `yaml:"rigid_boundaries" json:"rigid_boundaries"`
