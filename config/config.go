@@ -123,7 +123,7 @@ type Config struct {
 	// default to satisfy enterprise egress-segregation policies. Operators
 	// who explicitly want the legacy behavior of routing active traffic out
 	// of the default network can set this to false.
-	ActiveStrict bool `yaml:"active_strict,omitempty" json:"active_strict"`
+	ActiveStrict bool `yaml:"active_strict" json:"active_strict"`
 
 	// ActiveDNSResolver is the host:port of the DNS resolver that
 	// active-derived DNS queries (e.g. PTR lookups for active sweeps) are

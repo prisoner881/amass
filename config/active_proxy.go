@@ -27,6 +27,13 @@ func validateActiveProxyURL(raw string) error {
 		return fmt.Errorf("active_proxy is empty")
 	}
 
+	// url.Parse is permissive: "127.0.0.1:8080" parses without error but
+	// produces an empty Scheme. Detect the missing-scheme case before
+	// calling Parse so the error message always mentions "scheme".
+	if !strings.Contains(raw, "://") {
+		return fmt.Errorf("active_proxy must include a scheme (http, https, socks5, socks5h)")
+	}
+
 	u, err := url.Parse(raw)
 	if err != nil {
 		return fmt.Errorf("active_proxy is not a valid URL: %w", err)

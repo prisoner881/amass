@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"golang.org/x/net/proxy"
@@ -138,7 +139,13 @@ func NewActiveEgress(proxyURL string, probeTimeout time.Duration) (*ActiveEgress
 // through the supplied proxy URL. http/https proxies use HTTP CONNECT
 // (manual implementation for non-CONNECT TCP would be ambiguous), so the
 // returned dialer for those schemes will only succeed for the destinations
-// the proxy is willing to relay. socks5(h) goes through golang.org/x/net/proxy.
+// the proxy is willing to relay. socks5 and socks5h both use
+// golang.org/x/net/proxy.SOCKS5. That library sends hostnames verbatim
+// to the proxy using the SOCKS5 DOMAINNAME address type, giving socks5h
+// semantics (proxy-side resolution) automatically when the caller passes
+// a hostname rather than a pre-resolved IP. Active-mode callers always
+// pass hostnames or discovered IPs and never pre-resolve, so proxy-side
+// resolution works correctly for both schemes.
 func buildProxyDialContext(u *url.URL, perDialTimeout time.Duration) (DialContext, error) {
 	switch strings.ToLower(u.Scheme) {
 	case "socks5", "socks5h":
@@ -242,15 +249,19 @@ func httpConnectDialer(proxyURL *url.URL, perDialTimeout time.Duration) DialCont
 // that the CONNECT response reader buffered past the response.
 type bufferedConn struct {
 	net.Conn
+	mu  sync.Mutex
 	buf []byte
 }
 
 func (b *bufferedConn) Read(p []byte) (int, error) {
+	b.mu.Lock()
 	if len(b.buf) > 0 {
 		n := copy(p, b.buf)
 		b.buf = b.buf[n:]
+		b.mu.Unlock()
 		return n, nil
 	}
+	b.mu.Unlock()
 	return b.Conn.Read(p)
 }
 

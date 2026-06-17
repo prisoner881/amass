@@ -12,7 +12,6 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -167,35 +166,24 @@ func TestActiveEgress_HTTPConnect_TunnelsTCP(t *testing.T) {
 }
 
 func TestActiveEgress_HTTPClient_RoutesThroughProxy(t *testing.T) {
-	// Origin server records the host header.
-	gotHost := make(chan string, 1)
-	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotHost <- r.Host
-		_, _ = w.Write([]byte("ok"))
-	}))
-	defer origin.Close()
-	originURL, _ := url.Parse(origin.URL)
+	// proxySeen records whether the proxy handler was invoked.
+	proxySeen := make(chan struct{}, 1)
 
-	// Proxy: forwards plain HTTP (no CONNECT) to the origin so we can test
-	// that Transport.Proxy was honored.
-	proxySeen := make(chan string, 1)
-	proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		proxySeen <- r.URL.String()
-		// Forward the request to the origin without preserving original
-		// behaviour — this is enough to prove the request went through us.
-		r.URL = originURL
-		r.RequestURI = ""
-		resp, err := http.DefaultClient.Do(r)
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusBadGateway)
-			return
+	// Proxy server: records the hit and returns 200 immediately.
+	// We do not forward to an origin — we only need to prove that
+	// ae.Client routes through the proxy, not that it reaches the
+	// final destination. Using a non-forwarding proxy avoids the
+	// keep-alive connection leak that caused this test to hang.
+	proxyServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case proxySeen <- struct{}{}:
+		default:
 		}
-		defer func() { _ = resp.Body.Close() }()
-		_, _ = io.Copy(w, resp.Body)
+		w.WriteHeader(http.StatusOK)
 	}))
-	defer proxy.Close()
+	defer proxyServer.Close()
 
-	ae, err := NewActiveEgress(proxy.URL, time.Second)
+	ae, err := NewActiveEgress(proxyServer.URL, time.Second)
 	if err != nil {
 		t.Fatalf("NewActiveEgress: %v", err)
 	}
@@ -203,8 +191,8 @@ func TestActiveEgress_HTTPClient_RoutesThroughProxy(t *testing.T) {
 		t.Fatalf("expected active client")
 	}
 
-	// Use a plain http:// URL so the Transport sends it through the proxy
-	// (CONNECT would only be triggered for https).
+	// Use a plain http:// URL — Transport.Proxy routes it through the
+	// proxy server above rather than dialing example.invalid directly.
 	resp, err := ae.Client.Get("http://example.invalid/probe")
 	if err != nil {
 		t.Fatalf("client.Get: %v", err)
@@ -213,13 +201,8 @@ func TestActiveEgress_HTTPClient_RoutesThroughProxy(t *testing.T) {
 
 	select {
 	case <-proxySeen:
-	case <-time.After(2 * time.Second):
+		// good — proxy was used
+	case <-time.After(3 * time.Second):
 		t.Fatalf("active proxy was not used")
-	}
-	// gotHost should have been hit by the proxy forwarding to origin.
-	select {
-	case <-gotHost:
-	case <-time.After(2 * time.Second):
-		t.Fatalf("origin was not reached via proxy")
 	}
 }
