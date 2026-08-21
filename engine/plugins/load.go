@@ -26,6 +26,7 @@ var pluginNewFuncs = []func() et.Plugin{
 	api.NewBinaryEdge,
 	api.NewCertSpotter,
 	api.NewChaos,
+	api.NewCommonCrawl,
 	api.NewCrtsh,
 	api.NewDNSDumpster,
 	api.NewDNSRepo,
