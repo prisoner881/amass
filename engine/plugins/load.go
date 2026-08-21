@@ -24,6 +24,7 @@ import (
 
 var pluginNewFuncs = []func() et.Plugin{
 	api.NewBinaryEdge,
+	api.NewCertSpotter,
 	api.NewChaos,
 	api.NewCrtsh,
 	api.NewDNSRepo,
