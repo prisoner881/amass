@@ -120,6 +120,8 @@ func PerformActiveQuery(ctx context.Context, sess et.Session, name string, qtype
 
 	resp, err := amassnet.ActiveDNSExchange(ctx, ae.DialContext, sess.Config().ActiveDNSResolver, msg)
 	if err != nil {
+		sess.Log().Error("active DNS exchange failed",
+			"name", name, "active_proxy", sess.Config().ActiveProxy, "error", err.Error())
 		return nil, err
 	}
 	if resp == nil {
