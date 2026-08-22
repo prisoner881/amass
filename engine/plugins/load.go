@@ -45,6 +45,7 @@ var pluginNewFuncs = []func() et.Plugin{
 	dnssd.NewDNSPlugin,
 	enrich.NewBannerURLs,
 	enrich.NewContacts,
+	enrich.NewTechStack,
 	enrich.NewEmails,
 	enrich.NewTLSCerts,
 	enrich.NewURLs,
