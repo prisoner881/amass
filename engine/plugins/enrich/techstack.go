@@ -126,13 +126,13 @@ func (ts *techStack) detect(e *et.Event, serv *oamplat.Service) {
 			continue
 		}
 
-		productEntity := ts.storeProduct(e, techName, appInfo)
+		productEntity := ts.storeProduct(e, serv, techName, version, appInfo)
 		if productEntity == nil {
 			continue
 		}
 
 		if version != "" {
-			ts.storeRelease(e, productEntity, techName, version)
+			ts.storeRelease(e, serv, productEntity, techName, version)
 		}
 	}
 }
@@ -147,7 +147,7 @@ func splitVersion(key string) (name, version string) {
 	return key, ""
 }
 
-func (ts *techStack) storeProduct(e *et.Event, techName string, appInfo wappalyzer.AppInfo) *dbt.Entity {
+func (ts *techStack) storeProduct(e *et.Event, serv *oamplat.Service, techName, version string, appInfo wappalyzer.AppInfo) *dbt.Entity {
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 10*time.Second)
 	defer cancel()
 
@@ -162,6 +162,8 @@ func (ts *techStack) storeProduct(e *et.Event, techName string, appInfo wappalyz
 		Description: appInfo.Description,
 	})
 	if err != nil || productEntity == nil {
+		ts.log.Error("failed to create Product entity",
+			"product", techName, "version", version, "asset", serv.ID, "error", errString(err))
 		return nil
 	}
 
@@ -171,6 +173,8 @@ func (ts *techStack) storeProduct(e *et.Event, techName string, appInfo wappalyz
 		ToEntity:   productEntity,
 	})
 	if err != nil || edge == nil {
+		ts.log.Error("failed to create product_used edge",
+			"product", techName, "version", version, "asset", serv.ID, "error", errString(err))
 		return productEntity
 	}
 
@@ -182,10 +186,13 @@ func (ts *techStack) storeProduct(e *et.Event, techName string, appInfo wappalyz
 	// A separate, external process is expected to resolve this to a
 	// real local asset and update this property in place later.
 	if appInfo.Icon != "" {
-		_, _ = e.Session.DB().CreateEntityProperty(ctx, productEntity, &general.SimpleProperty{
+		if _, err := e.Session.DB().CreateEntityProperty(ctx, productEntity, &general.SimpleProperty{
 			PropertyName:  "icon",
 			PropertyValue: appInfo.Icon,
-		})
+		}); err != nil {
+			ts.log.Warn("failed to store icon property",
+				"product", techName, "icon", appInfo.Icon, "asset", serv.ID, "error", err.Error())
+		}
 	}
 
 	_ = e.Dispatcher.DispatchEvent(&et.Event{
@@ -194,17 +201,34 @@ func (ts *techStack) storeProduct(e *et.Event, techName string, appInfo wappalyz
 		Session: e.Session,
 	})
 
+	ts.log.Info("product detected",
+		"product", techName, "version", version, "category", category, "asset", serv.ID)
+
 	return productEntity
 }
 
-func (ts *techStack) storeRelease(e *et.Event, productEntity *dbt.Entity, techName, version string) {
+// errString safely stringifies an error that may be nil, since a failed
+// CreateAsset/CreateEdge call can return (nil, nil) as well as a real
+// error - both are logged as failures here, so this avoids a nil
+// dereference when err itself is nil but the returned entity/edge was.
+func errString(err error) string {
+	if err == nil {
+		return "no entity/edge returned"
+	}
+	return err.Error()
+}
+
+func (ts *techStack) storeRelease(e *et.Event, serv *oamplat.Service, productEntity *dbt.Entity, techName, version string) {
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 10*time.Second)
 	defer cancel()
 
+	releaseName := techName + " " + version
 	releaseEntity, err := e.Session.DB().CreateAsset(ctx, &oamplat.ProductRelease{
-		Name: techName + " " + version,
+		Name: releaseName,
 	})
 	if err != nil || releaseEntity == nil {
+		ts.log.Error("failed to create ProductRelease entity",
+			"product", techName, "version", version, "asset", serv.ID, "error", errString(err))
 		return
 	}
 
@@ -214,10 +238,15 @@ func (ts *techStack) storeRelease(e *et.Event, productEntity *dbt.Entity, techNa
 		ToEntity:   releaseEntity,
 	})
 	if err != nil || edge == nil {
+		ts.log.Error("failed to create release edge",
+			"product", techName, "version", version, "asset", serv.ID, "error", errString(err))
 		return
 	}
 
 	src := &general.SourceProperty{Source: ts.source.Name, Confidence: ts.source.Confidence}
 	_, _ = e.Session.DB().CreateEntityProperty(ctx, releaseEntity, src)
 	_, _ = e.Session.DB().CreateEdgeProperty(ctx, edge, src)
+
+	ts.log.Info("product release recorded",
+		"product", techName, "version", version, "release", releaseName, "asset", serv.ID)
 }
