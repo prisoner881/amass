@@ -50,8 +50,6 @@ func JARMFingerprint(sess et.Session, target oam.Asset, portrel *general.PortRel
 		c, err := dial(ctx, "tcp", addr)
 		sess.NetSem().Release()
 		if err != nil {
-			sess.Log().Error("active JARM dial failed",
-				"target", addr, "active_proxy", sess.Config().ActiveProxy, "error", err.Error())
 			return "", err
 		}
 		defer func() { _ = c.Close() }()
