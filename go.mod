@@ -28,8 +28,8 @@ require (
 	github.com/owasp-amass/asset-db v0.24.4
 	github.com/owasp-amass/open-asset-model v0.15.1-0.20260306015734-5261c591eef2
 	github.com/owasp-amass/resolve v0.10.0
-	github.com/projectdiscovery/wappalyzergo v0.2.94
 	github.com/pioz/countries v0.2.2
+	github.com/projectdiscovery/wappalyzergo v0.2.94
 	github.com/samber/slog-common v0.22.0
 	github.com/samber/slog-syslog/v2 v2.5.4
 	github.com/stretchr/testify v1.11.1
