@@ -119,6 +119,10 @@ func (hp *httpProbing) query(e *et.Event, entity *dbt.Entity, target string, por
 	resp, err := amasshttp.RequestWebPage(ctx, client, &amasshttp.Request{URL: target})
 	e.Session.NetSem().Release()
 
+	if err != nil {
+		e.Session.Log().Error("active HTTP probe failed",
+			"target", target, "active_proxy", e.Session.Config().ActiveProxy, "error", err.Error())
+	}
 	if err == nil && resp != nil {
 		findings = append(findings, hp.store(e, resp, entity, port)...)
 	}
