@@ -38,7 +38,7 @@ var pluginNewFuncs = []func() et.Plugin{
 	api.NewProspeo,
 	api.NewSecurityTrails,
 	api.NewSubdomainCenter,
-	//api.NewURLScan,
+	api.NewURLScan,
 	api.NewVirusTotal,
 	api.NewZetalytics,
 	archive.NewWayback,
