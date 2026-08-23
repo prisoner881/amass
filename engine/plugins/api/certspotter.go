@@ -197,11 +197,24 @@ type certSpotterIssuance struct {
 // production to starve the pipeline's entire token pool for hours,
 // making the whole engine appear stalled well beyond just this plugin.
 // Reserve()+Delay() lets us see the wait upfront and bail out
-// immediately, without blocking, when it exceeds maxAcceptableWait -
-// the token is cancelled and returned to the limiter unused. Genuinely
-// short waits (the normal 2-second authenticated cadence, or the rare
-// first unauthenticated call) still just proceed as before.
-const maxAcceptableWait = 10 * time.Second
+// immediately, without blocking, when it exceeds an acceptable bound -
+// the token is cancelled and returned to the limiter unused.
+//
+// The bound itself has to differ by limiter, not be one flat number -
+// a first attempt at a single 10-second threshold for both was too
+// tight and started skipping normal, healthy work. With
+// support.MidHandlerInstances (16) concurrent handler slots, a burst of
+// simultaneous callers queues up behind one shared limiter regardless
+// of how reasonable its rate is:
+//   authenticated (2s interval):   16 * 2s = 32s worst-case normal queue
+//   unauthenticated (2.4h interval): even the 2nd caller already waits hours
+// So the authenticated bound needs real headroom above that 32s figure;
+// the unauthenticated one should stay short, since any real queue at
+// all behind a multi-hour interval is already unreasonable.
+const (
+	maxAcceptableAuthWait   = 45 * time.Second
+	maxAcceptableUnauthWait = 10 * time.Second
+)
 
 func (cs *certSpotter) page(e *et.Event, name, key, after string) ([]certSpotterIssuance, int, error) {
 	if !cs.readyToCall() {
@@ -209,8 +222,10 @@ func (cs *certSpotter) page(e *et.Event, name, key, after string) ([]certSpotter
 	}
 
 	limiter := cs.unauthLimiter
+	maxWait := maxAcceptableUnauthWait
 	if key != "" {
 		limiter = cs.authLimiter
+		maxWait = maxAcceptableAuthWait
 	}
 
 	reservation := limiter.Reserve()
@@ -218,7 +233,7 @@ func (cs *certSpotter) page(e *et.Event, name, key, after string) ([]certSpotter
 		return nil, 0, errors.New("CertSpotter: rate limiter cannot grant a reservation")
 	}
 	delay := reservation.Delay()
-	if delay > maxAcceptableWait {
+	if delay > maxWait {
 		reservation.Cancel()
 		cs.log.Warn("skipping CertSpotter call, rate limit wait too long",
 			"name", name, "wait", delay.String(), "authenticated", key != "")
