@@ -101,7 +101,15 @@ func (r *fqdnLookup) lookup(e *et.Event, name string, since time.Time) *dbt.Enti
 // the pipeline's FQDN token pool for everything else. Reserve()+Delay()
 // lets the wait be seen upfront and skipped, cleanly, past a reasonable
 // bound, rather than blocking indefinitely while holding that slot.
-const maxAcceptableWHOISWait = 10 * time.Second
+//
+// The bound needs real headroom for normal concurrent queuing, not just
+// a short cutoff - an earlier 10-second threshold was too tight: with
+// support.MidHandlerInstances (16) concurrent handler slots all
+// potentially needing a WHOIS lookup at once, and a 5-second interval,
+// the worst-case *normal* queue depth is 16 * 5s = 80s. A threshold
+// anywhere near 10s would skip most of a legitimate concurrent burst,
+// not just the pathological cases this was meant to catch.
+const maxAcceptableWHOISWait = 90 * time.Second
 
 func (r *fqdnLookup) query(e *et.Event, name string, fent *dbt.Entity, src *et.Source) (*dbt.Entity, *whoisparser.WhoisInfo) {
 	reservation := r.plugin.rlimit.Reserve()
