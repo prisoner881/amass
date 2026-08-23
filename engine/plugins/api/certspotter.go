@@ -185,6 +185,24 @@ type certSpotterIssuance struct {
 // page performs a single page of the CT Search API "List Issuances for a
 // Domain" call and returns the decoded issuances plus any Retry-After value
 // (seconds) the server attached to the response.
+//
+// Rate limiting here is bounded, not unconditional - this matters
+// specifically because of the unauthenticated limiter's real interval
+// (~2.4 hours, matching CertSpotter's actual documented unauthenticated
+// ceiling of ~10/day). A plain limiter.Wait(ctx) blocks the calling
+// goroutine until a token is available, however long that takes - and
+// that goroutine is holding one of the pipeline's limited concurrency
+// slots the entire time. With many concurrent FQDNs all needing a turn
+// through a single shared unauthenticated limiter, this was observed in
+// production to starve the pipeline's entire token pool for hours,
+// making the whole engine appear stalled well beyond just this plugin.
+// Reserve()+Delay() lets us see the wait upfront and bail out
+// immediately, without blocking, when it exceeds maxAcceptableWait -
+// the token is cancelled and returned to the limiter unused. Genuinely
+// short waits (the normal 2-second authenticated cadence, or the rare
+// first unauthenticated call) still just proceed as before.
+const maxAcceptableWait = 10 * time.Second
+
 func (cs *certSpotter) page(e *et.Event, name, key, after string) ([]certSpotterIssuance, int, error) {
 	if !cs.readyToCall() {
 		return nil, 0, errors.New("CertSpotter: waiting out a server-directed backoff")
@@ -194,7 +212,25 @@ func (cs *certSpotter) page(e *et.Event, name, key, after string) ([]certSpotter
 	if key != "" {
 		limiter = cs.authLimiter
 	}
-	_ = limiter.Wait(e.Session.Ctx())
+
+	reservation := limiter.Reserve()
+	if !reservation.OK() {
+		return nil, 0, errors.New("CertSpotter: rate limiter cannot grant a reservation")
+	}
+	delay := reservation.Delay()
+	if delay > maxAcceptableWait {
+		reservation.Cancel()
+		cs.log.Warn("skipping CertSpotter call, rate limit wait too long",
+			"name", name, "wait", delay.String(), "authenticated", key != "")
+		return nil, 0, errors.New("CertSpotter: rate limit wait exceeded acceptable bound")
+	}
+
+	select {
+	case <-e.Session.Ctx().Done():
+		reservation.Cancel()
+		return nil, 0, e.Session.Ctx().Err()
+	case <-time.After(delay):
+	}
 
 	params := url.Values{}
 	params.Set("domain", name)
