@@ -88,8 +88,40 @@ func (r *fqdnLookup) lookup(e *et.Event, name string, since time.Time) *dbt.Enti
 	return nil
 }
 
+// query respects WHOIS-server-friendly pacing via a bounded wait, not an
+// unconditional one - same fix, same reasoning as the CertSpotter fix
+// applied earlier: r.plugin.rlimit is a single limiter shared across
+// every concurrent apex-domain lookup. A plain limiter.Wait(ctx) blocks
+// the calling goroutine - and the pipeline execution slot it's
+// holding - for however long its turn takes. The configured rate here
+// (1 per 5 seconds) is reasonable on its own, but with many distinct
+// apex domains discovered in a single run, concurrent callers queuing
+// up behind one shared limiter reproduces the same effective stall,
+// observed directly in production: waits up to 30+ minutes, starving
+// the pipeline's FQDN token pool for everything else. Reserve()+Delay()
+// lets the wait be seen upfront and skipped, cleanly, past a reasonable
+// bound, rather than blocking indefinitely while holding that slot.
+const maxAcceptableWHOISWait = 10 * time.Second
+
 func (r *fqdnLookup) query(e *et.Event, name string, fent *dbt.Entity, src *et.Source) (*dbt.Entity, *whoisparser.WhoisInfo) {
-	_ = r.plugin.rlimit.Wait(e.Session.Ctx())
+	reservation := r.plugin.rlimit.Reserve()
+	if !reservation.OK() {
+		return nil, nil
+	}
+	delay := reservation.Delay()
+	if delay > maxAcceptableWHOISWait {
+		reservation.Cancel()
+		r.plugin.log.Warn("skipping WHOIS lookup, rate limit wait too long",
+			"name", name, "wait", delay.String())
+		return nil, nil
+	}
+
+	select {
+	case <-e.Session.Ctx().Done():
+		reservation.Cancel()
+		return nil, nil
+	case <-time.After(delay):
+	}
 
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 10*time.Second)
 	defer cancel()
