@@ -111,6 +111,7 @@ func (s *Server) routes(r *mux.Router) {
 
 	v1 := r.PathPrefix("/api/v1").Subrouter()
 	v1.HandleFunc("/health", s.apiV1.HealthCheck).Methods(http.MethodGet)
+	v1.HandleFunc("/handler-stats", s.apiV1.GetHandlerStatsHandler).Methods(http.MethodGet)
 
 	sessions := v1.PathPrefix("/sessions").Subrouter()
 	sessions.HandleFunc("", s.apiV1.CreateSessionHandler).Methods(http.MethodPost)
@@ -119,6 +120,7 @@ func (s *Server) routes(r *mux.Router) {
 	session := sessions.PathPrefix("/{session_token:" + uuidRE + "}").Subrouter()
 	session.HandleFunc("", s.apiV1.TerminateSessionHandler).Methods(http.MethodDelete)
 	session.HandleFunc("/stats", s.apiV1.GetStatsHandler).Methods(http.MethodGet)
+	session.HandleFunc("/backlog", s.apiV1.GetBacklogHandler).Methods(http.MethodGet)
 
 	scope := session.PathPrefix("/scope").Subrouter()
 	scope.HandleFunc("/{asset_type:"+assetTypeRE+"}", s.apiV1.GetScopeHandler).Methods(http.MethodGet)

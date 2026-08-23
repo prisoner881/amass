@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/InfluxCommunity/influxdb3-go/v2/influxdb3"
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/owasp-amass/amass/v5/config"
@@ -450,5 +451,186 @@ func (v *V1Handlers) AddAssetsBulkHandler(w http.ResponseWriter, r *http.Request
 		Ingested: ingested,
 		Stored:   stored,
 		Failed:   failed,
+	})
+}
+
+// --- Additions for the backlog and handler-latency dashboard endpoints ---
+//
+// These two endpoints are deliberately separate in shape, because the data
+// behind them lives in two genuinely different places:
+//
+// GetBacklogHandler reads Session.Backlog().Counts(atype) directly - data
+// that already exists in memory for every running session, no new tracking
+// added anywhere. It is correctly scoped under /sessions/{session_token},
+// matching every other per-session endpoint in this file.
+//
+// GetHandlerStatsHandler queries InfluxDB, using the existing (write-only
+// until now) telemetry in engine/registry/pipelines.go's handlerTask func.
+// That telemetry tags each data point only with "handler" (an
+// AssetType-Position string) - there is no session identifier anywhere on
+// the write side. So this endpoint is NOT session-scoped, on purpose: it
+// reflects what the underlying data actually is (engine-process-wide),
+// rather than presenting per-session numbers that don't exist. If multiple
+// sessions run concurrently against the same engine, this data is
+// commingled across all of them - worth knowing before relying on it,
+// not something this endpoint can fix without also changing the write
+// side to add a session tag.
+
+// BacklogBucket represents one asset type's current backlog state.
+type BacklogBucket struct {
+	AssetType string `json:"asset_type"`
+	Queued    int64  `json:"queued"`
+	Leased    int64  `json:"leased"`
+	Processed int64  `json:"processed"`
+}
+
+// BacklogResponse is the payload for GetBacklogHandler.
+type BacklogResponse struct {
+	Buckets []BacklogBucket `json:"buckets"`
+}
+
+// allTrackedAssetTypes lists every asset type the backlog is queried for.
+// This is the full set defined in open-asset-model, not a curated subset -
+// buckets with zero activity (Queued+Leased+Processed == 0) are omitted
+// from the response rather than hardcoding which types matter, since that
+// set can change as new plugins are added.
+var allTrackedAssetTypes = []oam.AssetType{
+	oam.Account, oam.AutnumRecord, oam.AutonomousSystem, oam.ContactRecord,
+	oam.DomainRecord, oam.File, oam.FQDN, oam.FundsTransfer, oam.Identifier,
+	oam.IPAddress, oam.IPNetRecord, oam.Location, oam.Netblock,
+	oam.Organization, oam.Person, oam.Phone, oam.Product, oam.ProductRelease,
+	oam.Service, oam.TLSCertificate, oam.URL,
+}
+
+// GetBacklogHandler godoc
+//
+// @Summary      Get per-asset-type backlog counts for a session
+// @Description  Returns, for each asset type with any activity, the number of entities queued, currently leased (in flight), and already processed. Backed entirely by data already tracked in Session.Backlog() - no new tracking added.
+// @Tags         sessions
+// @Produce      json
+// @Param        session_token  path  string  true  "Session token (UUID)"
+// @Success      200  {object}  BacklogResponse
+// @Failure      400  {object}  ErrorResponse  "Invalid session token"
+// @Failure      404  {object}  ErrorResponse  "Session not found"
+// @Router       /sessions/{session_token}/backlog [get]
+func (v *V1Handlers) GetBacklogHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	sid := vars["session_token"]
+
+	token, err := uuid.Parse(sid)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid session token", err)
+		return
+	}
+
+	sess := v.mgr.GetSession(token)
+	if sess == nil {
+		writeError(w, http.StatusNotFound, "session not found", ErrNotFound)
+		return
+	}
+
+	var buckets []BacklogBucket
+	for _, atype := range allTrackedAssetTypes {
+		queued, leased, done, err := sess.Backlog().Counts(atype)
+		if err != nil {
+			continue
+		}
+		if queued == 0 && leased == 0 && done == 0 {
+			continue
+		}
+		buckets = append(buckets, BacklogBucket{
+			AssetType: string(atype),
+			Queued:    queued,
+			Leased:    leased,
+			Processed: done,
+		})
+	}
+
+	writeJSON(w, http.StatusOK, BacklogResponse{Buckets: buckets})
+}
+
+// HandlerStat represents one handler's average execution time and call
+// count over the query window.
+type HandlerStat struct {
+	Handler       string  `json:"handler"`
+	AvgDurationNS float64 `json:"avg_duration_ns"`
+	CallCount     int64   `json:"call_count"`
+}
+
+// HandlerStatsResponse is the payload for GetHandlerStatsHandler.
+type HandlerStatsResponse struct {
+	WindowMinutes int           `json:"window_minutes"`
+	Handlers      []HandlerStat `json:"handlers"`
+}
+
+// GetHandlerStatsHandler godoc
+//
+// @Summary      Get per-handler average execution time
+// @Description  Queries InfluxDB for the handler_duration measurement written by the engine's pipeline task wrapper, returning average duration and call count per handler over the last 15 minutes, sorted slowest first. Not session-scoped - see the note above GetBacklogHandler for why. Returns 503 if INFLUX_* environment variables are not configured.
+// @Tags         telemetry
+// @Produce      json
+// @Success      200  {object}  HandlerStatsResponse
+// @Failure      503  {object}  ErrorResponse  "InfluxDB not configured or unreachable"
+// @Router       /handler-stats [get]
+func (v *V1Handlers) GetHandlerStatsHandler(w http.ResponseWriter, r *http.Request) {
+	client, err := influxdb3.NewFromEnv()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "influxdb not configured", err)
+		return
+	}
+	defer func() { _ = client.Close() }()
+
+	const windowMinutes = 15
+	query := `SELECT handler, AVG(duration) AS avg_duration_ns, COUNT(*) AS call_count
+FROM handler_duration
+WHERE time >= now() - INTERVAL '15 minutes'
+GROUP BY handler
+ORDER BY avg_duration_ns DESC`
+
+	iter, err := client.Query(r.Context(), query)
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "influxdb query failed", err)
+		return
+	}
+
+	var stats []HandlerStat
+	for iter.Next() {
+		row := iter.Value()
+
+		handler, _ := row["handler"].(string)
+		if handler == "" {
+			continue
+		}
+
+		var avg float64
+		switch val := row["avg_duration_ns"].(type) {
+		case float64:
+			avg = val
+		case int64:
+			avg = float64(val)
+		}
+
+		var count int64
+		switch val := row["call_count"].(type) {
+		case int64:
+			count = val
+		case float64:
+			count = int64(val)
+		}
+
+		stats = append(stats, HandlerStat{
+			Handler:       handler,
+			AvgDurationNS: avg,
+			CallCount:     count,
+		})
+	}
+	if err := iter.Err(); err != nil {
+		writeError(w, http.StatusInternalServerError, "error reading query results", err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, HandlerStatsResponse{
+		WindowMinutes: windowMinutes,
+		Handlers:      stats,
 	})
 }
