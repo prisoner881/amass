@@ -11,7 +11,6 @@ import (
 	"log/slog"
 	"net/netip"
 	"net/url"
-	"strconv"
 	"strings"
 	"time"
 
@@ -112,17 +111,19 @@ func (u *urlscan) Start(r et.Registry) error {
 		return err
 	}
 
-	if err := r.RegisterHandler(&et.Handler{
-		Plugin:       u,
-		Name:         u.name + "-ASN-Handler",
-		Position:     25,
-		MaxInstances: support.MidHandlerInstances,
-		Transforms:   []string{string(oam.FQDN), string(oam.IPAddress)},
-		EventType:    oam.AutonomousSystem,
-		Callback:     u.checkASN,
-	}); err != nil {
-		return err
-	}
+	// The ASN-triggered handler (checkASN, "asn:AS<N>" queries) was
+	// deliberately removed after real-world testing against
+	// fortifydata.com. Querying by ASN only produces meaningful results
+	// for organizations that own and announce dedicated IP space
+	// themselves - for the far more common case of a target hosted on
+	// shared cloud infrastructure (AWS, Azure, GCP, etc.), the ASN
+	// belongs to the cloud provider, not the target, and the query
+	// returns essentially every unrelated domain anyone has ever hosted
+	// on that provider. In production this produced 58,000+ globally
+	// unrelated FQDNs from a single run against one real domain. There
+	// is no reliable way to distinguish a dedicated ASN from a shared
+	// cloud-provider ASN in advance, so this handler is not re-added
+	// conditionally - it is removed outright.
 
 	u.log.Info("Plugin started")
 	return nil
@@ -171,28 +172,8 @@ func (u *urlscan) checkFQDN(e *et.Event) error {
 	return nil
 }
 
-func (u *urlscan) checkASN(e *et.Event) error {
-	asn, ok := e.Entity.Asset.(*oamnet.AutonomousSystem)
-	if !ok {
-		return errors.New("failed to extract the AutonomousSystem asset")
-	}
-
-	key := u.apiKey(e)
-	if key == "" {
-		return nil
-	}
-
-	since, err := support.TTLStartTime(e.Session.Config(), string(oam.AutonomousSystem), string(oam.FQDN), u.name)
-	if err != nil {
-		return err
-	}
-
-	if !support.AssetMonitoredWithinTTL(e.Session, e.Entity, u.source, since) {
-		u.query(e, "asn:AS"+strconv.Itoa(asn.Number), key)
-		support.MarkAssetMonitored(e.Session, e.Entity, u.source)
-	}
-	return nil
-}
+// checkASN and its "asn:AS<N>" query type were removed - see the note in
+// Start() for why.
 
 type urlscanPage struct {
 	Domain     string `json:"domain"`
@@ -343,9 +324,28 @@ func (u *urlscan) storeIP(e *et.Event, fqdnEntity *dbt.Entity, ipStr string) *db
 	return ipEntity
 }
 
+// isValidPTRHostname rejects the two malformed value shapes actually
+// observed in real production data from urlscan.io's page.ptr field: a
+// bare IP address, and a raw reverse-DNS zone name (in-addr.arpa /
+// ip6.arpa) - the PTR query name itself, not a resolved hostname. Both
+// were found being stored directly as FQDN entities before this check
+// existed.
+func isValidPTRHostname(name string) bool {
+	if name == "" {
+		return false
+	}
+	if strings.HasSuffix(name, ".in-addr.arpa") || strings.HasSuffix(name, ".ip6.arpa") {
+		return false
+	}
+	if _, err := netip.ParseAddr(name); err == nil {
+		return false
+	}
+	return true
+}
+
 func (u *urlscan) storePTR(e *et.Event, ipEntity *dbt.Entity, ptrName string) {
 	name := strings.ToLower(strings.TrimSpace(ptrName))
-	if name == "" {
+	if !isValidPTRHostname(name) {
 		return
 	}
 

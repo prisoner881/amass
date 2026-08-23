@@ -145,3 +145,27 @@ func TestClassifyIPRRTypeMatchesFamily(t *testing.T) {
 		t.Errorf("expected TypeA for an IPv4 address, got %v (ok=%v)", rrtype, ok)
 	}
 }
+
+// TestIsValidPTRHostname covers the two malformed shapes actually found
+// in real production data - a bare IP address and a raw reverse-DNS
+// zone name - alongside real, valid hostnames to confirm neither
+// direction is over-corrected.
+func TestIsValidPTRHostname(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"www.luxoft.com", true},                                     // real value from earlier verification
+		{"ec2-54-217-223-222.eu-west-1.compute.amazonaws.com", true}, // real value from earlier verification
+		{"", false},
+		{"213.149.1.171", false},              // real malformed value found in production
+		{"36.116.165.18.in-addr.arpa", false}, // real malformed value found in production
+		{"2001:db8::1", false},                // IPv6 address, same category of error
+		{"1.2.3.4.ip6.arpa", false},
+	}
+	for _, c := range cases {
+		if got := isValidPTRHostname(c.name); got != c.want {
+			t.Errorf("isValidPTRHostname(%q) = %v, want %v", c.name, got, c.want)
+		}
+	}
+}
