@@ -206,8 +206,10 @@ type certSpotterIssuance struct {
 // support.MidHandlerInstances (16) concurrent handler slots, a burst of
 // simultaneous callers queues up behind one shared limiter regardless
 // of how reasonable its rate is:
-//   authenticated (2s interval):   16 * 2s = 32s worst-case normal queue
-//   unauthenticated (2.4h interval): even the 2nd caller already waits hours
+//
+//	authenticated (2s interval):   16 * 2s = 32s worst-case normal queue
+//	unauthenticated (2.4h interval): even the 2nd caller already waits hours
+//
 // So the authenticated bound needs real headroom above that 32s figure;
 // the unauthenticated one should stay short, since any real queue at
 // all behind a multi-hour interval is already unreasonable.
