@@ -272,12 +272,21 @@ func rdapToWhoisInfo(resp *rdapDomainResponse, domain string) *whoisparser.Whois
 	info := &whoisparser.WhoisInfo{Domain: dom}
 
 	for _, ent := range resp.Entities {
+		addr := extractVCardAddress(ent.VcardArray)
 		contact := &whoisparser.Contact{
 			Name:         extractVCardField(ent.VcardArray, "fn"),
 			Organization: extractVCardField(ent.VcardArray, "org"),
 			Email:        extractVCardField(ent.VcardArray, "email"),
+			Street:       addr.Street,
+			City:         addr.City,
+			Province:     addr.Province,
+			PostalCode:   addr.PostalCode,
+			Country:      addr.Country,
+			Phone:        extractVCardPhone(ent.VcardArray, false),
+			Fax:          extractVCardPhone(ent.VcardArray, true),
 		}
-		if contact.Name == "" && contact.Organization == "" && contact.Email == "" {
+		if contact.Name == "" && contact.Organization == "" && contact.Email == "" &&
+			contact.Street == "" && contact.Phone == "" {
 			// Nothing usable extracted - common for registrant/admin/tech
 			// roles on modern records, redacted for privacy under most
 			// current registry policies. Not an RDAP-specific gap; the
@@ -307,8 +316,7 @@ func rdapToWhoisInfo(resp *rdapDomainResponse, domain string) *whoisparser.Whois
 // "email") out of an RDAP entity's jCard vcardArray. jCard's shape is
 // ["vcard", [ [propName, {params}, valueType, value], ... ]] - this
 // only handles the simple-string-value case, which covers name,
-// organization, and email; structured fields like "adr" (address,
-// itself an array of components) are intentionally not handled here.
+// organization, and email.
 func extractVCardField(vcardArray json.RawMessage, field string) string {
 	if len(vcardArray) == 0 {
 		return ""
@@ -335,6 +343,135 @@ func extractVCardField(vcardArray json.RawMessage, field string) string {
 		var val string
 		if err := json.Unmarshal(p[3], &val); err == nil && val != "" {
 			return val
+		}
+	}
+	return ""
+}
+
+// vcardAddress holds the subset of jCard's "adr" structured components
+// that map onto whoisparser.Contact's own address fields.
+type vcardAddress struct {
+	Street, City, Province, PostalCode, Country string
+}
+
+// extractVCardAddress parses the "adr" property's structured value - a
+// 7-element array per RFC 6350/7095: [POBox, ExtendedAddress, Street,
+// City, Region, PostalCode, Country]. Individual components can
+// themselves be nested arrays (RFC 7095 §3.3.1.3, e.g. a multi-line
+// street address) rather than plain strings - jCardComponent below
+// handles both shapes. Verified against both the RFC's own worked
+// examples and realistic real-world RDAP entity data before use here.
+func extractVCardAddress(vcardArray json.RawMessage) vcardAddress {
+	var addr vcardAddress
+	if len(vcardArray) == 0 {
+		return addr
+	}
+
+	var outer []json.RawMessage
+	if err := json.Unmarshal(vcardArray, &outer); err != nil || len(outer) < 2 {
+		return addr
+	}
+
+	var props [][]json.RawMessage
+	if err := json.Unmarshal(outer[1], &props); err != nil {
+		return addr
+	}
+
+	for _, p := range props {
+		if len(p) < 4 {
+			continue
+		}
+		var propName string
+		if err := json.Unmarshal(p[0], &propName); err != nil || !strings.EqualFold(propName, "adr") {
+			continue
+		}
+		var components []json.RawMessage
+		if err := json.Unmarshal(p[3], &components); err != nil || len(components) < 7 {
+			continue
+		}
+		addr.Street = jCardComponent(components[2])
+		addr.City = jCardComponent(components[3])
+		addr.Province = jCardComponent(components[4])
+		addr.PostalCode = jCardComponent(components[5])
+		addr.Country = jCardComponent(components[6])
+		return addr
+	}
+	return addr
+}
+
+// jCardComponent handles a single ADR sub-component that may be a plain
+// string, or (per RFC 7095 §3.3.1.3) a nested array of strings, joined
+// with a space in that case.
+func jCardComponent(raw json.RawMessage) string {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s
+	}
+	var arr []string
+	if err := json.Unmarshal(raw, &arr); err == nil {
+		return strings.Join(arr, " ")
+	}
+	return ""
+}
+
+// extractVCardPhone pulls a "tel" property's value, disambiguating
+// phone versus fax via the TYPE parameter (RFC 6350 §5.6) rather than a
+// separate property name - both share "tel" as the property, and are
+// only distinguished by whether "fax" appears in TYPE. jCard tel values
+// are commonly a "tel:"-prefixed URI rather than a bare number, which
+// is stripped here before returning.
+func extractVCardPhone(vcardArray json.RawMessage, wantFax bool) string {
+	if len(vcardArray) == 0 {
+		return ""
+	}
+
+	var outer []json.RawMessage
+	if err := json.Unmarshal(vcardArray, &outer); err != nil || len(outer) < 2 {
+		return ""
+	}
+
+	var props [][]json.RawMessage
+	if err := json.Unmarshal(outer[1], &props); err != nil {
+		return ""
+	}
+
+	for _, p := range props {
+		if len(p) < 4 {
+			continue
+		}
+		var propName string
+		if err := json.Unmarshal(p[0], &propName); err != nil || !strings.EqualFold(propName, "tel") {
+			continue
+		}
+
+		var params struct {
+			Type json.RawMessage `json:"type"`
+		}
+		_ = json.Unmarshal(p[1], &params)
+
+		isFax := false
+		if len(params.Type) > 0 {
+			var types []string
+			if err := json.Unmarshal(params.Type, &types); err == nil {
+				for _, t := range types {
+					if strings.EqualFold(t, "fax") {
+						isFax = true
+					}
+				}
+			} else {
+				var single string
+				if err := json.Unmarshal(params.Type, &single); err == nil && strings.EqualFold(single, "fax") {
+					isFax = true
+				}
+			}
+		}
+		if isFax != wantFax {
+			continue
+		}
+
+		var val string
+		if err := json.Unmarshal(p[3], &val); err == nil && val != "" {
+			return strings.TrimPrefix(val, "tel:")
 		}
 	}
 	return ""
