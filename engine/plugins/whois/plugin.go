@@ -6,6 +6,7 @@ package whois
 
 import (
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
@@ -21,16 +22,42 @@ type whois struct {
 	fqdn   *fqdnLookup
 	domrec *domrec
 	source *et.Source
+
+	// RDAP is tried first (see rdap.go) - a separate limiter and
+	// source, since it's a genuinely different protocol/infrastructure
+	// with its own, generally more permissive, pacing characteristics.
+	// The legacy WHOIS limiter above is left completely untouched as
+	// the fallback path for TLDs RDAP doesn't cover.
+	rdapLimiter *rate.Limiter
+	rdapSource  *et.Source
+
+	// rdapRetryNotBefore honors a real Retry-After signal from an RDAP
+	// server (RFC 7480 SS5.5 defines 429 + Retry-After as the standard
+	// backoff mechanism) - same pattern already proven for CertSpotter.
+	rdapMu             sync.Mutex
+	rdapRetryNotBefore time.Time
 }
 
 func NewWHOIS() et.Plugin {
 	limit := rate.Every(5 * time.Second)
+	// Same cadence already used elsewhere in this codebase for a
+	// domain-adjacent RDAP source (engine/plugins/api/rdap uses this
+	// same 2-second interval for IP/ASN RDAP lookups) - a consistent,
+	// already-precedented starting point rather than an arbitrary new
+	// number. Real backpressure comes from honoring 429/Retry-After
+	// directly, not from guessing the right static rate up front.
+	rdapLimit := rate.Every(2 * time.Second)
 
 	return &whois{
 		name:   "WHOIS",
 		rlimit: rate.NewLimiter(limit, 1),
 		source: &et.Source{
 			Name:       "WHOIS",
+			Confidence: 90,
+		},
+		rdapLimiter: rate.NewLimiter(rdapLimit, 1),
+		rdapSource: &et.Source{
+			Name:       "RDAP",
 			Confidence: 90,
 		},
 	}

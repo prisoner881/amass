@@ -78,7 +78,7 @@ func (r *fqdnLookup) lookup(e *et.Event, name string, since time.Time) *dbt.Enti
 	dr := ents[0]
 
 	if tags, err := e.Session.DB().FindEntityTags(ctx, dr,
-		since, r.plugin.source.Name); err == nil && len(tags) > 0 {
+		since, r.plugin.source.Name, r.plugin.rdapSource.Name); err == nil && len(tags) > 0 {
 		for _, tag := range tags {
 			if tag.Property.PropertyType() == oam.SourceProperty {
 				return dr
@@ -88,9 +88,28 @@ func (r *fqdnLookup) lookup(e *et.Event, name string, since time.Time) *dbt.Enti
 	return nil
 }
 
-// query respects WHOIS-server-friendly pacing via a bounded wait, not an
-// unconditional one - same fix, same reasoning as the CertSpotter fix
-// applied earlier: r.plugin.rlimit is a single limiter shared across
+// query tries RDAP first, falling back to the legacy WHOIS protocol
+// lookup only if RDAP has no bootstrap entry for the domain's TLD, or
+// the RDAP call itself fails. Both paths converge on the same
+// storeRecord() below, so downstream consumers - the DomainRecord
+// created here, and domain_record.go's contact extraction - see
+// identical structure and shape regardless of which source actually
+// answered.
+func (r *fqdnLookup) query(e *et.Event, name string, fent *dbt.Entity, src *et.Source) (*dbt.Entity, *whoisparser.WhoisInfo) {
+	if info, raw, err := r.plugin.queryRDAP(e, name); err == nil && info != nil {
+		return r.storeRecord(e, info, raw, fent, r.plugin.rdapSource)
+	}
+
+	info, raw, err := r.queryWHOIS(e, name)
+	if err != nil || info == nil {
+		return nil, nil
+	}
+	return r.storeRecord(e, info, raw, fent, src)
+}
+
+// queryWHOIS respects WHOIS-server-friendly pacing via a bounded wait,
+// not an unconditional one - same fix, same reasoning as the CertSpotter
+// fix applied earlier: r.plugin.rlimit is a single limiter shared across
 // every concurrent apex-domain lookup. A plain limiter.Wait(ctx) blocks
 // the calling goroutine - and the pipeline execution slot it's
 // holding - for however long its turn takes. The configured rate here
@@ -111,23 +130,23 @@ func (r *fqdnLookup) lookup(e *et.Event, name string, since time.Time) *dbt.Enti
 // not just the pathological cases this was meant to catch.
 const maxAcceptableWHOISWait = 90 * time.Second
 
-func (r *fqdnLookup) query(e *et.Event, name string, fent *dbt.Entity, src *et.Source) (*dbt.Entity, *whoisparser.WhoisInfo) {
+func (r *fqdnLookup) queryWHOIS(e *et.Event, name string) (*whoisparser.WhoisInfo, string, error) {
 	reservation := r.plugin.rlimit.Reserve()
 	if !reservation.OK() {
-		return nil, nil
+		return nil, "", errors.New("WHOIS: rate limiter cannot grant a reservation")
 	}
 	delay := reservation.Delay()
 	if delay > maxAcceptableWHOISWait {
 		reservation.Cancel()
 		r.plugin.log.Warn("skipping WHOIS lookup, rate limit wait too long",
 			"name", name, "wait", delay.String())
-		return nil, nil
+		return nil, "", errors.New("WHOIS: rate limit wait exceeded acceptable bound")
 	}
 
 	select {
 	case <-e.Session.Ctx().Done():
 		reservation.Cancel()
-		return nil, nil
+		return nil, "", e.Session.Ctx().Err()
 	case <-time.After(delay):
 	}
 
@@ -140,11 +159,24 @@ func (r *fqdnLookup) query(e *et.Event, name string, fent *dbt.Entity, src *et.S
 
 	select {
 	case <-ctx.Done():
-		return nil, nil
+		return nil, "", ctx.Err()
 	case resp = <-ch:
 	}
+	if resp == "" {
+		return nil, "", errors.New("WHOIS: empty response")
+	}
 
-	return r.store(e, resp, fent, src)
+	info, err := whoisparser.Parse(resp)
+	if err != nil {
+		msg := fmt.Sprintf("failed to parse the WHOIS record for %s", name)
+		e.Session.Log().Error(msg, slog.Group("plugin", "name", r.plugin.name, "handler", r.name))
+		return nil, "", err
+	}
+	if !strings.EqualFold(info.Domain.Domain, name) {
+		return nil, "", fmt.Errorf("WHOIS: parsed domain %q does not match %q", info.Domain.Domain, name)
+	}
+
+	return &info, resp, nil
 }
 
 func (r *fqdnLookup) whoisRoutine(sess et.Session, name string, ch chan string) {
@@ -157,18 +189,17 @@ func (r *fqdnLookup) whoisRoutine(sess et.Session, name string, ch chan string) 
 	ch <- resp
 }
 
-func (r *fqdnLookup) store(e *et.Event, resp string, fent *dbt.Entity, src *et.Source) (*dbt.Entity, *whoisparser.WhoisInfo) {
+// storeRecord is the single, shared path both RDAP and WHOIS results
+// flow through - identical DomainRecord construction, identical edge
+// creation, identical downstream event shape, regardless of which
+// source actually answered. info is expected fully populated per the
+// whoisparser.WhoisInfo shape either way: WHOIS via whoisparser.Parse,
+// RDAP via rdapToWhoisInfo in rdap.go.
+func (r *fqdnLookup) storeRecord(e *et.Event, info *whoisparser.WhoisInfo, raw string, fent *dbt.Entity, src *et.Source) (*dbt.Entity, *whoisparser.WhoisInfo) {
 	fqdn := fent.Asset.(*oamdns.FQDN)
 
-	info, err := whoisparser.Parse(resp)
-	if err != nil || !strings.EqualFold(info.Domain.Domain, fqdn.Name) {
-		msg := fmt.Sprintf("failed to parse the WHOIS record for %s", fqdn.Name)
-		e.Session.Log().Error(msg, slog.Group("plugin", "name", r.plugin.name, "handler", r.name))
-		return nil, nil
-	}
-
 	dr := &oamreg.DomainRecord{
-		Raw:            resp,
+		Raw:            raw,
 		ID:             info.Domain.ID,
 		Domain:         strings.ToLower(info.Domain.Domain),
 		Punycode:       info.Domain.Punycode,
@@ -197,6 +228,17 @@ func (r *fqdnLookup) store(e *et.Event, resp string, fent *dbt.Entity, src *et.S
 
 	autasset, err := e.Session.DB().CreateAsset(ctx, dr)
 	if err == nil && autasset != nil {
+		// Tag the DomainRecord entity itself with its real source, in
+		// addition to the edge below - this is what lets
+		// domain_record.go's handler determine dynamically whether a
+		// given record came from RDAP or WHOIS, rather than assuming
+		// one unconditionally for every downstream Person/Organization/
+		// ContactRecord entity it derives from it.
+		_, _ = e.Session.DB().CreateEntityProperty(ctx, autasset, &general.SourceProperty{
+			Source:     src.Name,
+			Confidence: src.Confidence,
+		})
+
 		if edge, err := e.Session.DB().CreateEdge(ctx, &dbt.Edge{
 			Relation:   &general.SimpleRelation{Name: "registration"},
 			FromEntity: fent,
@@ -206,12 +248,12 @@ func (r *fqdnLookup) store(e *et.Event, resp string, fent *dbt.Entity, src *et.S
 				Source:     src.Name,
 				Confidence: src.Confidence,
 			})
-			msg := fmt.Sprintf("successfully acquired the WHOIS record for %s", fqdn.Name)
+			msg := fmt.Sprintf("successfully acquired the %s record for %s", src.Name, fqdn.Name)
 			e.Session.Log().Info(msg, slog.Group("plugin", "name", r.plugin.name, "handler", r.name))
 		}
 	}
 
-	return autasset, &info
+	return autasset, info
 }
 
 func (r *fqdnLookup) process(e *et.Event, record *whoisparser.WhoisInfo, fqdn, dr *dbt.Entity) {

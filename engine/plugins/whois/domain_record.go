@@ -47,7 +47,7 @@ func (r *domrec) check(e *et.Event) error {
 		return nil
 	}
 
-	src := r.plugin.source
+	src := r.actualSource(e)
 	var findings []*support.Finding
 	if record, ok := e.Meta.(*whoisparser.WhoisInfo); ok && record != nil {
 		r.store(e, record, e.Entity, matches)
@@ -59,6 +59,38 @@ func (r *domrec) check(e *et.Event) error {
 		r.process(e, findings, src)
 	}
 	return nil
+}
+
+// actualSource determines whether the triggering DomainRecord actually
+// came from RDAP or WHOIS, by reading the source tag storeRecord() (in
+// fqdn_lookup.go) places directly on the entity - rather than assuming
+// r.plugin.source (WHOIS) unconditionally, which would misattribute
+// every RDAP-sourced record's derived Person/Organization/ContactRecord
+// entities. Falls back to r.plugin.source only if no tag is found,
+// matching the original, pre-RDAP behavior as a safe default.
+func (r *domrec) actualSource(e *et.Event) *et.Source {
+	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 3*time.Second)
+	defer cancel()
+
+	since := time.Now().Add(-5 * time.Minute)
+	tags, err := e.Session.DB().FindEntityTags(ctx, e.Entity,
+		since, r.plugin.source.Name, r.plugin.rdapSource.Name)
+	if err != nil {
+		return r.plugin.source
+	}
+
+	for _, tag := range tags {
+		if tag.Property.PropertyType() != oam.SourceProperty {
+			continue
+		}
+		if tag.Property.Name() == r.plugin.rdapSource.Name {
+			return r.plugin.rdapSource
+		}
+		if tag.Property.Name() == r.plugin.source.Name {
+			return r.plugin.source
+		}
+	}
+	return r.plugin.source
 }
 
 func (r *domrec) lookup(e *et.Event, asset *dbt.Entity, src *et.Source, m *config.Matches) []*support.Finding {
