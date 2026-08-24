@@ -197,9 +197,30 @@ type urlscanResponse struct {
 // to the FQDN that resolved to them, and PTR-derived FQDN entities with
 // proper ptr_record edges back to their IPAddress - see the type-level
 // comment for why each of these choices was made.
+// maxAcceptableURLScanWait mirrors the reasoning already applied to
+// CertSpotter and WHOIS: support.MidHandlerInstances (16) concurrent
+// callers against this limiter's 2-second interval gives a worst-case
+// normal queue of 16 * 2s = 32s - the bound needs real headroom above
+// that, not a short cutoff meant for a much slower limiter.
+const maxAcceptableURLScanWait = 45 * time.Second
+
 func (u *urlscan) query(e *et.Event, q, key string) {
-	if err := u.rlimit.Wait(e.Session.Ctx()); err != nil {
+	reservation := u.rlimit.Reserve()
+	if !reservation.OK() {
 		return
+	}
+	delay := reservation.Delay()
+	if delay > maxAcceptableURLScanWait {
+		reservation.Cancel()
+		u.log.Warn("skipping URLScan call, rate limit wait too long",
+			"query", q, "wait", delay.String())
+		return
+	}
+	select {
+	case <-e.Session.Ctx().Done():
+		reservation.Cancel()
+		return
+	case <-time.After(delay):
 	}
 	e.Session.NetSem().Acquire()
 

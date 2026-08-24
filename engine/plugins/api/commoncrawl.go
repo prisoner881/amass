@@ -139,6 +139,16 @@ type commonCrawlCollection struct {
 // Collections rotate roughly every two weeks, so caching for the life of
 // a run (rather than per-query) avoids redundant lookups without risking
 // meaningfully stale data within a single Amass execution.
+// maxAcceptableCommonCrawlWait mirrors the reasoning already applied to
+// CertSpotter and WHOIS: support.MidHandlerInstances (16) concurrent
+// callers against this limiter's 2-second interval gives a worst-case
+// normal queue of 16 * 2s = 32s - the bound needs real headroom above
+// that, not a short cutoff meant for a much slower limiter. Applies to
+// both call sites below, even though endpointList()'s own mutex+cache
+// pattern means it realistically only ever has one caller reach the
+// limiter in practice - kept consistent rather than judgment-called.
+const maxAcceptableCommonCrawlWait = 45 * time.Second
+
 func (cc *commonCrawl) endpointList(e *et.Event) []string {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
@@ -147,8 +157,22 @@ func (cc *commonCrawl) endpointList(e *et.Event) []string {
 		return cc.endpoints
 	}
 
-	if err := cc.rlimit.Wait(e.Session.Ctx()); err != nil {
+	reservation := cc.rlimit.Reserve()
+	if !reservation.OK() {
 		return nil
+	}
+	delay := reservation.Delay()
+	if delay > maxAcceptableCommonCrawlWait {
+		reservation.Cancel()
+		cc.log.Warn("skipping CommonCrawl collection list fetch, rate limit wait too long",
+			"wait", delay.String())
+		return nil
+	}
+	select {
+	case <-e.Session.Ctx().Done():
+		reservation.Cancel()
+		return nil
+	case <-time.After(delay):
 	}
 	e.Session.NetSem().Acquire()
 
@@ -215,8 +239,22 @@ func (cc *commonCrawl) query(e *et.Event, name string) []*dbt.Entity {
 func (cc *commonCrawl) queryCollection(e *et.Event, endpoint, name string) map[string]struct{} {
 	hosts := make(map[string]struct{})
 
-	if err := cc.rlimit.Wait(e.Session.Ctx()); err != nil {
+	reservation := cc.rlimit.Reserve()
+	if !reservation.OK() {
 		return hosts
+	}
+	delay := reservation.Delay()
+	if delay > maxAcceptableCommonCrawlWait {
+		reservation.Cancel()
+		cc.log.Warn("skipping CommonCrawl collection query, rate limit wait too long",
+			"name", name, "endpoint", endpoint, "wait", delay.String())
+		return hosts
+	}
+	select {
+	case <-e.Session.Ctx().Done():
+		reservation.Cancel()
+		return hosts
+	case <-time.After(delay):
 	}
 	e.Session.NetSem().Acquire()
 

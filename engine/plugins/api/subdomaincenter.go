@@ -125,9 +125,30 @@ func (sc *subdomainCenter) apiKey(e *et.Event) string {
 	return ""
 }
 
+// maxAcceptableSubdomainCenterWait mirrors the reasoning already applied
+// to CertSpotter and WHOIS: support.MidHandlerInstances (16) concurrent
+// callers against this limiter's 2-second interval gives a worst-case
+// normal queue of 16 * 2s = 32s - the bound needs real headroom above
+// that, not a short cutoff meant for a much slower limiter.
+const maxAcceptableSubdomainCenterWait = 45 * time.Second
+
 func (sc *subdomainCenter) query(e *et.Event, name, key string) []*dbt.Entity {
-	if err := sc.rlimit.Wait(e.Session.Ctx()); err != nil {
+	reservation := sc.rlimit.Reserve()
+	if !reservation.OK() {
 		return nil
+	}
+	delay := reservation.Delay()
+	if delay > maxAcceptableSubdomainCenterWait {
+		reservation.Cancel()
+		sc.log.Warn("skipping SubdomainCenter call, rate limit wait too long",
+			"name", name, "wait", delay.String())
+		return nil
+	}
+	select {
+	case <-e.Session.Ctx().Done():
+		reservation.Cancel()
+		return nil
+	case <-time.After(delay):
 	}
 	e.Session.NetSem().Acquire()
 

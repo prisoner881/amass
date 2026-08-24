@@ -141,9 +141,30 @@ type dnsDumpsterResponse struct {
 	APIError string                  `json:"error"`
 }
 
+// maxAcceptableDNSDumpsterWait mirrors the reasoning already applied to
+// CertSpotter and WHOIS: support.MidHandlerInstances (16) concurrent
+// callers against this limiter's 2-second interval gives a worst-case
+// normal queue of 16 * 2s = 32s - the bound needs real headroom above
+// that, not a short cutoff meant for a much slower limiter.
+const maxAcceptableDNSDumpsterWait = 45 * time.Second
+
 func (dd *dnsDumpster) query(e *et.Event, name, key string) []*dbt.Entity {
-	if err := dd.rlimit.Wait(e.Session.Ctx()); err != nil {
+	reservation := dd.rlimit.Reserve()
+	if !reservation.OK() {
 		return nil
+	}
+	delay := reservation.Delay()
+	if delay > maxAcceptableDNSDumpsterWait {
+		reservation.Cancel()
+		dd.log.Warn("skipping DNSDumpster call, rate limit wait too long",
+			"name", name, "wait", delay.String())
+		return nil
+	}
+	select {
+	case <-e.Session.Ctx().Done():
+		reservation.Cancel()
+		return nil
+	case <-time.After(delay):
 	}
 	e.Session.NetSem().Acquire()
 
