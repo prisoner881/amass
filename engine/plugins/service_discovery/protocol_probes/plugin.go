@@ -6,8 +6,10 @@ package protocol_probes
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
+	"os"
 	"strconv"
 	"time"
 
@@ -132,6 +134,12 @@ func (pp *protocolProbes) Stop() {
 }
 
 func (pp *protocolProbes) check(e *et.Event) error {
+	// TEMPORARY DIAGNOSTIC - remove once the missing-Service investigation
+	// is resolved. Writes directly to stderr, bypassing any uncertainty
+	// about where slog/syslog output actually ends up, to answer one
+	// specific question: is this function being called at all.
+	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes check() called for %v\n", e.Entity.Asset.Key())
+
 	ip, ok := e.Entity.Asset.(*oamnet.IPAddress)
 	if !ok {
 		return errors.New("failed to extract the IPAddress asset")
