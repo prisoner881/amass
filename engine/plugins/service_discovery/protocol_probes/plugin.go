@@ -142,6 +142,7 @@ func (pp *protocolProbes) check(e *et.Event) error {
 
 	ip, ok := e.Entity.Asset.(*oamnet.IPAddress)
 	if !ok {
+		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes EXIT type-assertion for %v\n", e.Entity.Asset.Key())
 		return errors.New("failed to extract the IPAddress asset")
 	}
 
@@ -149,25 +150,35 @@ func (pp *protocolProbes) check(e *et.Event) error {
 	// the target directly) - gated on -active the same way every other
 	// active-probing plugin in this codebase already is.
 	if !e.Session.Config().Active {
+		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes EXIT not-active for %v\n", ip.Address.String())
 		return nil
 	}
 
 	if _, conf := e.Session.Scope().IsAssetInScope(e.Entity.Asset, 0); conf <= 0 {
+		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes EXIT out-of-scope (conf=%d) for %v\n", conf, ip.Address.String())
 		return nil
 	}
 
 	ports := e.Session.Config().Scope.Ports
 	if len(ports) == 0 {
+		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes EXIT zero-ports for %v\n", ip.Address.String())
 		return nil
 	}
+	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes ports=%d for %v\n", len(ports), ip.Address.String())
 
 	since, err := support.TTLStartTime(e.Session.Config(), string(oam.IPAddress), string(oam.Service), pp.name)
 	if err != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes EXIT ttl-error (%v) for %v\n", err, ip.Address.String())
 		return err
 	}
+	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes since=%v for %v\n", since, ip.Address.String())
+
 	if support.AssetMonitoredWithinTTL(e.Session, e.Entity, pp.source, since) {
+		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes EXIT already-monitored for %v\n", ip.Address.String())
 		return nil
 	}
+
+	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes REACHED probe loop for %v\n", ip.Address.String())
 
 	addr := ip.Address.String()
 	dial := selectDialer(e)
@@ -175,6 +186,7 @@ func (pp *protocolProbes) check(e *et.Event) error {
 		pp.probeOnePort(e, dial, addr, port)
 	}
 
+	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes COMPLETED for %v\n", ip.Address.String())
 	support.MarkAssetMonitored(e.Session, e.Entity, pp.source)
 	return nil
 }
