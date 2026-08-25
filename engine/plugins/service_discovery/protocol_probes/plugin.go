@@ -155,7 +155,13 @@ func (pp *protocolProbes) check(e *et.Event) error {
 	}
 
 	if _, conf := e.Session.Scope().IsAssetInScope(e.Entity.Asset, 0); conf <= 0 {
-		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes EXIT out-of-scope (conf=%d) for %v\n", conf, ip.Address.String())
+		nblocks := e.Session.Scope().Netblocks()
+		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes EXIT out-of-scope (conf=%d, known_netblocks=%d) for %v\n", conf, len(nblocks), ip.Address.String())
+		for _, nb := range nblocks {
+			if nb.CIDR.Contains(ip.Address) {
+				fmt.Fprintf(os.Stderr, "DEBUG protocol_probes MATCHING NETBLOCK EXISTS BUT WASN'T MATCHED: %v contains %v\n", nb.CIDR, ip.Address)
+			}
+		}
 		return nil
 	}
 
