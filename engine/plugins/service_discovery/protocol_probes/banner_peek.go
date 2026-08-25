@@ -6,8 +6,9 @@ package protocol_probes
 
 import (
 	"context"
-	"net"
 	"time"
+
+	amassnet "github.com/owasp-amass/amass/v5/internal/net"
 )
 
 // maxPeekBytes bounds how much unsolicited data gets buffered per
@@ -33,16 +34,39 @@ type PeekResult struct {
 	Err error
 }
 
-// PeekBanner opens a plain TCP connection to addr, writes nothing at
-// all, and reads for up to timeout to see whether the remote end sends
-// something unprompted. This is the entire signal behind classifying a
-// port as "banner-first" (SSH, SMTP, FTP, POP3, and similar - protocols
-// that greet the client before it sends anything) versus
-// "client-speaks-first" (HTTP, HTTPS, and every implicit-TLS service) -
-// without needing to understand or emulate any specific protocol.
-func PeekBanner(ctx context.Context, addr string, timeout time.Duration) PeekResult {
-	var dialer net.Dialer
-	conn, err := dialer.DialContext(ctx, "tcp", addr)
+// PeekBanner opens a TCP connection to addr via the supplied dial
+// function, writes nothing at all, and reads for up to timeout to see
+// whether the remote end sends something unprompted. This is the
+// entire signal behind classifying a port as "banner-first" (SSH,
+// SMTP, FTP, POP3, and similar - protocols that greet the client
+// before it sends anything) versus "client-speaks-first" (HTTP, HTTPS,
+// and every implicit-TLS service) - without needing to understand or
+// emulate any specific protocol.
+//
+// dial is deliberately injected rather than hardcoded to a plain
+// net.Dialer: this is active-only traffic (it directly touches
+// whatever is listening on the target's port), and amassnet.DialContext
+// is the exact same dialer type already used throughout this codebase
+// for that category of traffic - including, on the feature/
+// active-proxy-egress branch specifically, the type an
+// *ActiveEgress.DialContext field satisfies. Accepting this type here,
+// rather than dialing directly, is what makes it possible for this
+// function to correctly route through the operator's configured active
+// proxy once that branch is merged, without requiring any further
+// changes to this function itself - only the caller needs to change,
+// exactly the same pattern already proven in
+// engine/plugins/support/fingerprinting.go for JARM's own raw dial.
+//
+// If dial is nil, callers get amassnet.NewDialContext's plain, direct
+// dialer - the correct, and only available, behavior on this branch
+// today, since the active-proxy-egress mechanism doesn't exist here
+// yet.
+func PeekBanner(ctx context.Context, dial amassnet.DialContext, addr string, timeout time.Duration) PeekResult {
+	if dial == nil {
+		dial = amassnet.NewDialContext(timeout)
+	}
+
+	conn, err := dial(ctx, "tcp", addr)
 	if err != nil {
 		return PeekResult{Err: err}
 	}

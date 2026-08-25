@@ -9,11 +9,11 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
-	"net"
 	"time"
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
 	et "github.com/owasp-amass/amass/v5/engine/types"
+	amassnet "github.com/owasp-amass/amass/v5/internal/net"
 	dbt "github.com/owasp-amass/asset-db/types"
 	oamcert "github.com/owasp-amass/open-asset-model/certificate"
 	oamgen "github.com/owasp-amass/open-asset-model/general"
@@ -42,7 +42,16 @@ var harvestSource = &et.Source{Name: "Protocol-Probes", Confidence: 80}
 // harvested for it (the dedup guard - this is what avoids redundant
 // work against ports http_probes already covers, typically 443), and
 // otherwise perform the handshake and store whatever chain comes back.
-func HarvestCertificate(e *et.Event, parent *dbt.Entity, addr string, port int, timeout time.Duration) error {
+//
+// dial is the same injected amassnet.DialContext used by PeekBanner,
+// for the same reason: this is active-only traffic that must be able
+// to route through the operator's configured active proxy once
+// feature/active-proxy-egress is merged, without requiring further
+// changes to this function - see PeekBanner's own doc comment in
+// banner_peek.go for the complete reasoning. A nil dial falls back to
+// amassnet.NewDialContext's plain, direct dialer, the only option this
+// branch has available today.
+func HarvestCertificate(e *et.Event, dial amassnet.DialContext, parent *dbt.Entity, addr string, port int, timeout time.Duration) error {
 	svcEntity, err := FindOrCreateService(e, parent, addr, port, "tls", "")
 	if err != nil {
 		return err
@@ -58,7 +67,7 @@ func HarvestCertificate(e *et.Event, parent *dbt.Entity, addr string, port int, 
 		return nil
 	}
 
-	certs, err := dialAndGetCertChain(addr, timeout)
+	certs, err := dialAndGetCertChain(e.Session.Ctx(), dial, addr, timeout)
 	if err != nil {
 		return err
 	}
@@ -70,30 +79,41 @@ func HarvestCertificate(e *et.Event, parent *dbt.Entity, addr string, port int, 
 	return nil
 }
 
-// dialAndGetCertChain performs a plain, standard-library TLS handshake
-// against addr and returns the full peer certificate chain on success.
-// This is the one genuinely new piece of acquisition logic this
-// project needed - everything downstream of a successful handshake
-// (parsing, chain walking, edge conventions) is fully reused from what
-// http_probes already does, unchanged.
+// dialAndGetCertChain performs a TLS handshake against addr, via the
+// supplied dial function, and returns the full peer certificate chain
+// on success. tls.DialWithDialer can't be used directly here since it
+// requires a concrete *net.Dialer rather than an arbitrary dial
+// function - instead, dial supplies the raw connection, and TLS is
+// layered on top of it manually via tls.Client + HandshakeContext, the
+// standard approach for TLS over an already-established connection
+// from a custom dialer.
 //
 // InsecureSkipVerify is intentional, not an oversight: the goal here is
 // harvesting whatever certificate a host presents, including expired,
 // self-signed, or otherwise untrusted ones - that data is still real
 // and worth recording - not validating whether the connection should
 // be trusted the way a normal TLS client would.
-func dialAndGetCertChain(addr string, timeout time.Duration) ([]*x509.Certificate, error) {
-	dialer := &net.Dialer{Timeout: timeout}
+func dialAndGetCertChain(ctx context.Context, dial amassnet.DialContext, addr string, timeout time.Duration) ([]*x509.Certificate, error) {
+	if dial == nil {
+		dial = amassnet.NewDialContext(timeout)
+	}
 
-	conn, err := tls.DialWithDialer(dialer, "tcp", addr, &tls.Config{
-		InsecureSkipVerify: true,
-	})
+	rawConn, err := dial(ctx, "tcp", addr)
 	if err != nil {
 		return nil, err
 	}
-	defer conn.Close()
+	defer rawConn.Close()
 
-	state := conn.ConnectionState()
+	if err := rawConn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return nil, err
+	}
+
+	tlsConn := tls.Client(rawConn, &tls.Config{InsecureSkipVerify: true})
+	if err := tlsConn.HandshakeContext(ctx); err != nil {
+		return nil, err
+	}
+
+	state := tlsConn.ConnectionState()
 	if !state.HandshakeComplete {
 		return nil, errors.New("protocol_probes: TLS handshake did not complete")
 	}

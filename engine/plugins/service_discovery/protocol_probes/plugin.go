@@ -13,6 +13,7 @@ import (
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
 	et "github.com/owasp-amass/amass/v5/engine/types"
+	amassnet "github.com/owasp-amass/amass/v5/internal/net"
 	oam "github.com/owasp-amass/open-asset-model"
 	oamnet "github.com/owasp-amass/open-asset-model/network"
 )
@@ -43,6 +44,35 @@ var ambiguousBannerDBs = []string{
 	"ftp_banners.xml",
 	"pop_banners.xml",
 	"telnet_banners.xml",
+}
+
+// selectDialer is the single, deliberately isolated place that decides
+// which dialer this plugin's active-only traffic (banner peeks, raw
+// TLS cert handshakes) actually uses. On this branch today it can only
+// ever return the plain, direct dialer - the active-proxy-egress
+// mechanism (Session.ActiveEgress(), Config().ActiveStrict) doesn't
+// exist on main yet, so there is nothing else to select.
+//
+// *** REQUIRED UPDATE ONCE MERGED WITH feature/active-proxy-egress ***
+// Replace this function's body with the exact same pattern JARM's own
+// raw dial already uses on that branch, in
+// engine/plugins/support/fingerprinting.go:
+//
+//	var dial amassnet.DialContext
+//	if ae := e.Session.ActiveEgress(); ae != nil {
+//	    dial = ae.DialContext
+//	} else if e.Session.Config().ActiveStrict {
+//	    return nil, amassnet.ErrNoActiveEgress
+//	} else {
+//	    dial = amassnet.NewDialContext(peekTimeout)
+//	}
+//
+// Every other line in this package - PeekBanner, HarvestCertificate,
+// dialAndGetCertChain - already accepts an injected amassnet.DialContext
+// and needs no further changes; this function is the only integration
+// point.
+func selectDialer(e *et.Event) amassnet.DialContext {
+	return amassnet.NewDialContext(peekTimeout)
 }
 
 type protocolProbes struct {
@@ -124,8 +154,9 @@ func (pp *protocolProbes) check(e *et.Event) error {
 	}
 
 	addr := ip.Address.String()
+	dial := selectDialer(e)
 	for _, port := range ports {
-		pp.probeOnePort(e, addr, port)
+		pp.probeOnePort(e, dial, addr, port)
 	}
 
 	support.MarkAssetMonitored(e.Session, e.Entity, pp.source)
@@ -137,10 +168,10 @@ func (pp *protocolProbes) check(e *et.Event) error {
 // individual port are logged and otherwise swallowed - one unreachable
 // or misbehaving port should never prevent the remaining configured
 // ports from being tried.
-func (pp *protocolProbes) probeOnePort(e *et.Event, addr string, port int) {
+func (pp *protocolProbes) probeOnePort(e *et.Event, dial amassnet.DialContext, addr string, port int) {
 	target := net.JoinHostPort(addr, strconv.Itoa(port))
 
-	result := PeekBanner(e.Session.Ctx(), target, peekTimeout)
+	result := PeekBanner(e.Session.Ctx(), dial, target, peekTimeout)
 	if result.Err != nil {
 		return
 	}
@@ -157,7 +188,7 @@ func (pp *protocolProbes) probeOnePort(e *et.Event, addr string, port int) {
 		// certharvest.go's own dedup guard means this is a genuine
 		// no-op, not wasted work, if http_probes already harvested a
 		// certificate here.
-		if err := HarvestCertificate(e, e.Entity, target, port, peekTimeout); err != nil {
+		if err := HarvestCertificate(e, dial, e.Entity, target, port, peekTimeout); err != nil {
 			pp.log.Warn("certificate harvest failed", "target", target, "error", err.Error())
 		}
 	}

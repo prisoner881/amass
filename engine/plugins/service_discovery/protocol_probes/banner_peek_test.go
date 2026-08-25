@@ -57,7 +57,7 @@ func startSilentServer(t *testing.T) string {
 func TestPeekBanner_ReceivesRealBanner(t *testing.T) {
 	addr := startBannerServer(t, "SSH-2.0-OpenSSH_9.6\r\n")
 
-	result := PeekBanner(context.Background(), addr, 2*time.Second)
+	result := PeekBanner(context.Background(), nil, addr, 2*time.Second)
 
 	if result.Err != nil {
 		t.Fatalf("unexpected error: %v", result.Err)
@@ -75,7 +75,7 @@ func TestPeekBanner_ReceivesRealBanner(t *testing.T) {
 func TestPeekBanner_SilentServer(t *testing.T) {
 	addr := startSilentServer(t)
 
-	result := PeekBanner(context.Background(), addr, 300*time.Millisecond)
+	result := PeekBanner(context.Background(), nil, addr, 300*time.Millisecond)
 
 	if result.Err != nil {
 		t.Fatalf("unexpected error: %v", result.Err)
@@ -98,7 +98,7 @@ func TestPeekBanner_ConnectionRefused(t *testing.T) {
 	addr := ln.Addr().String()
 	ln.Close() // release it immediately - nothing is listening now
 
-	result := PeekBanner(context.Background(), addr, 2*time.Second)
+	result := PeekBanner(context.Background(), nil, addr, 2*time.Second)
 
 	if result.Err == nil {
 		t.Fatal("expected a connection error, got nil")
@@ -114,10 +114,52 @@ func TestPeekBanner_EndToEndClassification(t *testing.T) {
 	// eventual plugin code will do.
 	addr := startBannerServer(t, "SSH-2.0-OpenSSH_9.6\r\n")
 
-	result := PeekBanner(context.Background(), addr, 2*time.Second)
+	result := PeekBanner(context.Background(), nil, addr, 2*time.Second)
 	guess := ClassifyPeek(result.Data)
 
 	if guess != GuessSSH {
 		t.Errorf("end-to-end classification = %v, want GuessSSH", guess)
+	}
+}
+
+// TestPeekBanner_UsesInjectedDialer and TestPeekBanner_NilDialerFallsBackToDirect
+// prove the dependency-injection design added for active-proxy-egress
+// compatibility genuinely works, not just that it compiles. See
+// PeekBanner's own doc comment for the full reasoning: this function
+// must be able to route through the operator's configured active proxy
+// once feature/active-proxy-egress is merged, without further changes
+// to this function itself.
+func TestPeekBanner_UsesInjectedDialer(t *testing.T) {
+	realAddr := startBannerServer(t, "SSH-2.0-OpenSSH_9.6\r\n")
+	dial, called := redirectingDialer(realAddr)
+
+	// unreachableAddr is passed as the target - if PeekBanner ignored
+	// the injected dialer and dialed directly, this would fail or hang
+	// rather than succeeding via the redirect.
+	result := PeekBanner(context.Background(), dial, unreachableAddr, 2*time.Second)
+
+	if !*called {
+		t.Fatal("injected dialer was never invoked - PeekBanner is not using the supplied dial function")
+	}
+	if result.Err != nil {
+		t.Fatalf("unexpected error (would indicate the real, unreachable address was dialed instead): %v", result.Err)
+	}
+	if string(result.Data) != "SSH-2.0-OpenSSH_9.6\r\n" {
+		t.Errorf("got data %q, want the real test server's banner", result.Data)
+	}
+}
+
+func TestPeekBanner_NilDialerFallsBackToDirect(t *testing.T) {
+	// Confirms the documented nil-dial fallback actually works, using a
+	// real local server reached via a real, direct connection.
+	addr := startBannerServer(t, "220 mail.example.com ESMTP\r\n")
+
+	result := PeekBanner(context.Background(), nil, addr, 2*time.Second)
+
+	if result.Err != nil {
+		t.Fatalf("unexpected error: %v", result.Err)
+	}
+	if string(result.Data) != "220 mail.example.com ESMTP\r\n" {
+		t.Errorf("got data %q, want the real banner", result.Data)
 	}
 }
