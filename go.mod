@@ -30,6 +30,7 @@ require (
 	github.com/owasp-amass/resolve v0.10.0
 	github.com/pioz/countries v0.2.2
 	github.com/projectdiscovery/wappalyzergo v0.2.94
+	github.com/runZeroInc/recog-go v0.1.1-0.20230801014443-aa6fe9074750
 	github.com/samber/slog-common v0.22.0
 	github.com/samber/slog-syslog/v2 v2.5.4
 	github.com/stretchr/testify v1.11.1
@@ -106,6 +107,7 @@ require (
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/rubenv/sql-migrate v1.8.1 // indirect
 	github.com/samber/lo v1.53.0 // indirect
+	github.com/sirupsen/logrus v1.9.4 // indirect
 	github.com/temoto/robotstxt v1.1.2 // indirect
 	github.com/xhit/go-str2duration/v2 v2.1.0 // indirect
 	github.com/zeebo/xxh3 v1.1.0 // indirect
