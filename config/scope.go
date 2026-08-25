@@ -81,14 +81,6 @@ func (s *Scope) populate() error {
 		return err
 	}
 
-	// Convert ProtocolProbePortsRaw to ProtocolProbePorts - kept as a
-	// fully separate function rather than generalizing parsePorts()
-	// above, so this addition can't affect the existing, already-relied
-	// upon Ports/PortsRaw behavior at all.
-	if err := s.parseProtocolProbePorts(); err != nil {
-		return err
-	}
-
 	parseIPs := ParseIPs{} // Create a new ParseIPs, which is a []net.IP under the hood
 	// Validate IP ranges in c.Scope.IP
 	for _, ipRange := range s.IP {
@@ -126,43 +118,6 @@ func (s *Scope) parsePorts() error {
 					return fmt.Errorf("invalid port string: %v", err)
 				}
 				s.Ports = append(s.Ports, portNum)
-			}
-		default:
-			return fmt.Errorf("unsupported port type: %T", p)
-		}
-	}
-
-	return nil
-}
-
-// parseProtocolProbePorts mirrors parsePorts() above exactly, operating
-// on the separate ProtocolProbePortsRaw/ProtocolProbePorts fields - a
-// deliberate duplication rather than a shared/generalized function, so
-// this addition carries zero risk to the existing Ports/PortsRaw
-// parsing that http_probes and other existing code already depend on.
-func (s *Scope) parseProtocolProbePorts() error {
-
-	if len(s.ProtocolProbePortsRaw) != 0 {
-		s.ProtocolProbePorts = []int{}
-	}
-
-	for _, port := range s.ProtocolProbePortsRaw {
-		switch p := port.(type) {
-		case int:
-			s.ProtocolProbePorts = append(s.ProtocolProbePorts, p)
-		case string:
-			if strings.Contains(p, "-") {
-				portRange, err := convertPortRangeToSlice(p)
-				if err != nil {
-					return err
-				}
-				s.ProtocolProbePorts = append(s.ProtocolProbePorts, portRange...)
-			} else {
-				portNum, err := strconv.Atoi(p)
-				if err != nil {
-					return fmt.Errorf("invalid port string: %v", err)
-				}
-				s.ProtocolProbePorts = append(s.ProtocolProbePorts, portNum)
 			}
 		default:
 			return fmt.Errorf("unsupported port type: %T", p)
