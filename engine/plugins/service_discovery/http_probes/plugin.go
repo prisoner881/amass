@@ -71,10 +71,10 @@ func (hp *httpProbing) Start(r et.Registry) error {
 		plugin: hp,
 	}
 	if err := r.RegisterHandler(&et.Handler{
-		Plugin:       hp,
-		Name:         hp.ipaddr.name,
-		Position:     42,
-		Exclusive:    true,
+		Plugin:    hp,
+		Name:      hp.ipaddr.name,
+		Position:  42,
+		Exclusive: true,
 		// Raised from MidHandlerInstances (16) to HighHandlerInstances (32).
 		// This handler has no rate limiter of its own (unlike WHOIS/RDAP/
 		// CertSpotter), so added concurrency translates into genuinely more
