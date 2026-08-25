@@ -75,7 +75,18 @@ func (hp *httpProbing) Start(r et.Registry) error {
 		Name:         hp.ipaddr.name,
 		Position:     42,
 		Exclusive:    true,
-		MaxInstances: support.MidHandlerInstances,
+		// Raised from MidHandlerInstances (16) to HighHandlerInstances (32).
+		// This handler has no rate limiter of its own (unlike WHOIS/RDAP/
+		// CertSpotter), so added concurrency translates into genuinely more
+		// real throughput rather than just deeper queuing behind a fixed
+		// external rate. Verified safe against port exhaustion before this
+		// change: every actual connection this handler makes - regardless
+		// of how many goroutines are spawned across ports and instances -
+		// still funnels through the single, global e.Session.NetSem()
+		// semaphore (capped at MaxNetworkConns/numOfSessions, 500 for a
+		// single-session run), which is what actually bounds real
+		// simultaneous connections, not this setting.
+		MaxInstances: support.HighHandlerInstances,
 		Transforms: []string{
 			string(oam.Service),
 			string(oam.TLSCertificate),
