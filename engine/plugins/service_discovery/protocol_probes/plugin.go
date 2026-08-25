@@ -22,17 +22,25 @@ import (
 // confirmed clear of every other handler already registered on this
 // event type (ip_netblock:4, bgptools:2, dns:8, horizontals:10,
 // http_probes:42) before this position was chosen. This runs
-// independently of http_probes, coordinating with it only through
-// observable database state (certharvest.go's dedup guard), not
-// through any direct call between the two plugins - each reads its own
-// separate configured port list and neither needs to know the other
-// exists.
+// independently of http_probes as a plugin (each has its own handler,
+// its own registration, its own database writes), but the two now
+// deliberately share the same aggregate Scope.Ports list and the same
+// banner-peek/classify logic (PeekBanner, ClassifyPeek, PeekTimeout,
+// all exported specifically so http_probes can call them directly) -
+// this is what lets http_probes skip a pointless HTTP attempt against
+// a port that peeks as unambiguously non-HTTP (e.g. an SSH banner),
+// rather than the two plugins working from separate port lists with no
+// coordination at all. Certificate harvesting still coordinates only
+// through observable database state (certharvest.go's dedup guard),
+// not a direct call - that part hasn't changed.
 
-// peekTimeout bounds how long the banner-peek step waits per port
+// PeekTimeout bounds how long the banner-peek step waits per port
 // before concluding a port is silent. Short and deliberate: a real
 // banner-first service greets immediately, so there is no reason to
-// wait long to find out nothing is coming.
-const peekTimeout = 2 * time.Second
+// wait long to find out nothing is coming. Exported so http_probes can
+// use the exact same bound when it performs its own peek, rather than
+// risking two different timeouts drifting apart over time.
+const PeekTimeout = 2 * time.Second
 
 // ambiguousBannerDBs are the Recog fingerprint databases tried, in
 // order, for a banner that arrived but wasn't unambiguously classified
@@ -64,7 +72,7 @@ var ambiguousBannerDBs = []string{
 //	} else if e.Session.Config().ActiveStrict {
 //	    return nil, amassnet.ErrNoActiveEgress
 //	} else {
-//	    dial = amassnet.NewDialContext(peekTimeout)
+//	    dial = amassnet.NewDialContext(PeekTimeout)
 //	}
 //
 // Every other line in this package - PeekBanner, HarvestCertificate,
@@ -72,7 +80,7 @@ var ambiguousBannerDBs = []string{
 // and needs no further changes; this function is the only integration
 // point.
 func selectDialer(e *et.Event) amassnet.DialContext {
-	return amassnet.NewDialContext(peekTimeout)
+	return amassnet.NewDialContext(PeekTimeout)
 }
 
 type protocolProbes struct {
@@ -140,7 +148,7 @@ func (pp *protocolProbes) check(e *et.Event) error {
 		return nil
 	}
 
-	ports := e.Session.Config().Scope.ProtocolProbePorts
+	ports := e.Session.Config().Scope.Ports
 	if len(ports) == 0 {
 		return nil
 	}
@@ -171,7 +179,7 @@ func (pp *protocolProbes) check(e *et.Event) error {
 func (pp *protocolProbes) probeOnePort(e *et.Event, dial amassnet.DialContext, addr string, port int) {
 	target := net.JoinHostPort(addr, strconv.Itoa(port))
 
-	result := PeekBanner(e.Session.Ctx(), dial, target, peekTimeout)
+	result := PeekBanner(e.Session.Ctx(), dial, target, PeekTimeout)
 	if result.Err != nil {
 		return
 	}
@@ -188,7 +196,7 @@ func (pp *protocolProbes) probeOnePort(e *et.Event, dial amassnet.DialContext, a
 		// certharvest.go's own dedup guard means this is a genuine
 		// no-op, not wasted work, if http_probes already harvested a
 		// certificate here.
-		if err := HarvestCertificate(e, dial, e.Entity, target, port, peekTimeout); err != nil {
+		if err := HarvestCertificate(e, dial, e.Entity, target, port, PeekTimeout); err != nil {
 			pp.log.Warn("certificate harvest failed", "target", target, "error", err.Error())
 		}
 	}
