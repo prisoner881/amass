@@ -43,7 +43,7 @@ var harvestSource = &et.Source{Name: "Protocol-Probes", Confidence: 80}
 // work against ports http_probes already covers, typically 443), and
 // otherwise perform the handshake and store whatever chain comes back.
 func HarvestCertificate(e *et.Event, parent *dbt.Entity, addr string, port int, timeout time.Duration) error {
-	svcEntity, err := findOrCreateService(e, parent, addr, port)
+	svcEntity, err := FindOrCreateService(e, parent, addr, port, "tls", "")
 	if err != nil {
 		return err
 	}
@@ -108,12 +108,16 @@ func dialAndGetCertChain(addr string, timeout time.Duration) ([]*x509.Certificat
 // rather than reusing CreateServiceAsset, whose own dedup logic is
 // tuned for content-bearing HTTP services (it compares OutputLen,
 // which is meaningless for a cert-only harvest with no page body).
-func findOrCreateService(e *et.Event, parent *dbt.Entity, addr string, port int) (*dbt.Entity, error) {
+//
+// Exported and takes svcType/output as parameters rather than being
+// hardcoded to the cert-harvest case, so plugin.go's banner-first path
+// (service.go) can reuse this exact same construction instead of a
+// second, near-duplicate implementation.
+func FindOrCreateService(e *et.Event, parent *dbt.Entity, addr string, port int, svcType, output string) (*dbt.Entity, error) {
 	serv := support.ServiceWithIdentifier(addr, "tcp", port)
-	// Type is deliberately left as a generic marker here - real
-	// protocol identification (if any, via banner classification) is
-	// layered in separately, not decided by this cert-focused path.
-	serv.Type = "tls"
+	serv.Type = svcType
+	serv.Output = output
+	serv.OutputLen = len(output)
 
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 15*time.Second)
 	defer cancel()
