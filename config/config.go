@@ -187,6 +187,21 @@ type Scope struct {
 	// The ports checked for certificates
 	Ports []int `yaml:"-" json:"ports,omitempty"`
 
+	// ProtocolProbePortsRaw mirrors PortsRaw's own parsing (single
+	// ports and "start-end" ranges) for a genuinely separate port
+	// list, consumed by the protocol_probes plugin rather than
+	// http_probes. Kept as an entirely distinct field, not a
+	// repurposing of Ports/PortsRaw above - those remain exactly what
+	// they've always been (the ports http_probes treats as HTTP
+	// candidates); this is an aggregate list that protocol_probes
+	// banner-peeks and routes itself (SSH banner, ambiguous
+	// banner-first, or silent/implicit-TLS cert harvest), not a set
+	// assumed to be running HTTP.
+	ProtocolProbePortsRaw []interface{} `yaml:"protocol_probe_ports,omitempty" json:"-"`
+
+	// The parsed result of ProtocolProbePortsRaw.
+	ProtocolProbePorts []int `yaml:"-" json:"protocol_probe_ports,omitempty"`
+
 	// A blacklist of subdomain names that will not be investigated
 	Blacklist []string `yaml:"blacklist,omitempty" json:"blacklist,omitempty"`
 }
