@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"time"
 
+	pp "github.com/owasp-amass/amass/v5/engine/plugins/service_discovery/protocol_probes"
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
 	et "github.com/owasp-amass/amass/v5/engine/types"
 	amassnet "github.com/owasp-amass/amass/v5/internal/net"
@@ -123,6 +124,28 @@ func (r *ipaddrEndpoint) probeOnePort(e *et.Event, ipaddr *dbt.Entity, port int,
 		a = "[" + a + "]"
 	}
 	addr := a + ":" + strconv.Itoa(port)
+
+	// A quick, cheap banner peek before committing to a full HTTP
+	// request - this is what lets an aggregate Scope.Ports list mix
+	// HTTP and non-HTTP services (SSH, SMTP, FTP, etc.) without
+	// wastefully attempting an HTTP request against a port that's
+	// unambiguously something else. Reuses protocol_probes' own
+	// PeekBanner/ClassifyPeek/PeekTimeout directly - the same logic
+	// and the same bound that plugin uses for its own classification,
+	// rather than a second, potentially-drifting implementation here.
+	//
+	// Only an unambiguous non-HTTP classification skips the request:
+	// a definite SSH banner, or a banner-first response that arrived
+	// but wasn't SSH (near-certainly SMTP/FTP/POP3/etc., none of which
+	// would produce a sensible HTTP response either). Silence is left
+	// completely alone - that's the normal, expected signature of an
+	// HTTP or HTTPS service, so those ports proceed exactly as before,
+	// with zero behavior change for the common case.
+	peek := pp.PeekBanner(e.Session.Ctx(), nil, addr, pp.PeekTimeout)
+	if guess := pp.ClassifyPeek(peek.Data); guess == pp.GuessSSH || guess == pp.GuessAmbiguousBanner {
+		ch <- nil
+		return
+	}
 
 	proto := "https"
 	if port == 80 || port == 8080 {
