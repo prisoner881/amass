@@ -66,12 +66,22 @@ func (d *dnsIP) check(e *et.Event) error {
 			}
 
 			var size int
-			if _, conf := e.Session.Scope().IsAssetInScope(ip, 0); conf > 0 {
-				size = d.plugin.secondSweepSize
-				if e.Session.Config().Active {
-					size = d.plugin.maxSweepSize
-				}
-			} else if _, conf2 := e.Session.Scope().IsAssetInScope(fqdn, 0); conf2 > 0 {
+			// Sweep sizing is deliberately driven by FQDN-based scope
+			// only, not IP/Netblock-based scope - even after the
+			// Scope.AddNetblock() fix (see ip_netblock.go and
+			// bgptools/netblock.go), which makes this IP-based scope
+			// check correctly succeed for IPs within a discovered,
+			// in-scope netblock. Coupling sweep aggressiveness to
+			// netblock membership would mean any target using shared
+			// cloud infrastructure (AWS/Azure ranges get added to scope
+			// regardless of -rigid) could trigger a 250-address active
+			// sweep of unrelated third-party hosts sharing that same
+			// range - a real scope-boundary risk, not just a
+			// performance concern. This deliberately preserves the
+			// conservative, firstSweepSize-only behavior already in
+			// effect (if accidentally, prior to the scope fix)
+			// throughout this project's history.
+			if _, conf := e.Session.Scope().IsAssetInScope(fqdn, 0); conf > 0 {
 				size = d.plugin.firstSweepSize
 			}
 			if size > 0 {

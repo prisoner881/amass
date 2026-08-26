@@ -86,16 +86,20 @@ func (d *dnsReverse) check(e *et.Event) error {
 		support.AddDNSRecordType(e, int(dns.TypePTR))
 		d.process(e, rev)
 
-		var size int
-		if _, conf := e.Session.Scope().IsAssetInScope(ip, 0); conf > 0 {
-			size = d.plugin.secondSweepSize
-			if e.Session.Config().Active {
-				size = d.plugin.maxSweepSize
-			}
-		}
-		if size > 0 {
-			support.IPAddressSweep(e, ip, src, size, sweepCallback)
-		}
+		// PTR-triggered sweeping was removed here, not fixed to use
+		// the (now-corrected, see ip_netblock.go/bgptools/netblock.go)
+		// IP-based scope check. That check has never once succeeded
+		// throughout this project's history, and this path had no
+		// fallback the way dns/ip.go does - meaning this sweep has
+		// never actually fired, ever. The PTR-resolved hostname here
+		// is a discovered *output* of an arbitrary reverse lookup,
+		// not a trusted, already-validated input the way dns/ip.go's
+		// originating FQDN is, so checking scope against it wouldn't
+		// be a faithful equivalent - it would be new, different
+		// behavior, not a preserved one. Removing this dead code is
+		// the accurate way to keep today's real behavior (no sweep
+		// from this path) while still letting the scope fix benefit
+		// every other consumer of IsAssetInScope correctly.
 	}
 	return nil
 }
