@@ -191,7 +191,7 @@ func (r *netblock) store(e *et.Event, cidr netip.Prefix, ip *dbt.Entity, asn int
 	// ip_netblock.go for the full reasoning. Same root-cause fix,
 	// applied here since this is the other real discovery point for
 	// Netblock entities.
-	e.Session.Scope().AddNetblock(netblock)
+	e.Session.Scope().Add(netblock)
 
 	_, _ = e.Session.DB().CreateEntityProperty(ctx, nb, &general.SourceProperty{
 		Source:     r.plugin.source.Name,
