@@ -129,6 +129,17 @@ func (d *ipNetblock) store(e *et.Event, entry *sessions.CIDRangerEntry) (*dbt.En
 		return nil, nil
 	}
 
+	// Registers the discovered netblock with the session's live scope
+	// tracker (e.Session.Scope()), not just the database. Without this,
+	// Scope.Netblocks() stays permanently empty regardless of how many
+	// Netblock entities get created - IsAssetInScope() for any IPAddress
+	// falling within a genuinely in-scope netblock would always report
+	// out-of-scope, since it checks that live tracker, not the database.
+	// Confirmed directly: prior to this fix, Scope.AddNetblock() had no
+	// real callers anywhere in the codebase for dynamically-discovered
+	// netblocks.
+	e.Session.Scope().AddNetblock(netblock)
+
 	_, _ = e.Session.DB().CreateEntityProperty(ctx, nb, &general.SourceProperty{
 		Source:     entry.Src.Name,
 		Confidence: entry.Src.Confidence,
