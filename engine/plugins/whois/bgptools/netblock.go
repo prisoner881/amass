@@ -177,13 +177,21 @@ func (r *netblock) store(e *et.Event, cidr netip.Prefix, ip *dbt.Entity, asn int
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 3*time.Minute)
 	defer cancel()
 
-	nb, err := e.Session.DB().CreateAsset(ctx, &oamnet.Netblock{
+	netblock := &oamnet.Netblock{
 		CIDR: cidr,
 		Type: ntype,
-	})
+	}
+	nb, err := e.Session.DB().CreateAsset(ctx, netblock)
 	if err != nil || nb == nil {
 		return nil, nil
 	}
+
+	// Registers the discovered netblock with the session's live scope
+	// tracker, not just the database - see the equivalent comment in
+	// ip_netblock.go for the full reasoning. Same root-cause fix,
+	// applied here since this is the other real discovery point for
+	// Netblock entities.
+	e.Session.Scope().AddNetblock(netblock)
 
 	_, _ = e.Session.DB().CreateEntityProperty(ctx, nb, &general.SourceProperty{
 		Source:     r.plugin.source.Name,
