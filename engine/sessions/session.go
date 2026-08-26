@@ -339,17 +339,40 @@ func NewSessSemaphore(limit int) *sessSemaphore {
 }
 
 func (ss *sessSemaphore) Acquire() {
+	// The lock is held only long enough to safely read the current
+	// semaphore reference - never across the call to sem.Acquire()
+	// itself, which blocks whenever the semaphore is full. Holding the
+	// lock across that blocking call was the actual bug: since
+	// buildNewSessionSemaphore() (below) needs this same lock to safely
+	// swap ss.sem during dynamic resizing, a goroutine blocked here
+	// while still holding the lock meant Release() - which also needs
+	// this lock just to run at all - could never execute either,
+	// permanently starving every other goroutine waiting to acquire or
+	// release a slot. Confirmed directly via a goroutine dump: exactly
+	// one goroutine stuck in this call while holding the lock, with
+	// hundreds of others queued behind Lock() as a direct result.
+	//
+	// Taking a local copy of the channel reference before unlocking is
+	// safe and correct even if buildNewSessionSemaphore() reassigns
+	// ss.sem concurrently afterward - Semaphore is a channel (a
+	// reference type), so this goroutine's in-flight Acquire() still
+	// completes correctly against whichever semaphore was current at
+	// the moment it started, rather than racing on the field itself.
 	ss.Lock()
-	defer ss.Unlock()
+	sem := ss.sem
+	ss.Unlock()
 
-	ss.sem.Acquire()
+	sem.Acquire()
 }
 
 func (ss *sessSemaphore) Release() {
+	// Same reasoning as Acquire() above - the lock only protects the
+	// field read, not the call to the underlying channel.
 	ss.Lock()
-	defer ss.Unlock()
+	sem := ss.sem
+	ss.Unlock()
 
-	ss.sem.Release()
+	sem.Release()
 }
 
 func (s *Session) updateSessionSemaphore() {
