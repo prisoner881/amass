@@ -135,10 +135,16 @@ func (d *ipNetblock) store(e *et.Event, entry *sessions.CIDRangerEntry) (*dbt.En
 	// Netblock entities get created - IsAssetInScope() for any IPAddress
 	// falling within a genuinely in-scope netblock would always report
 	// out-of-scope, since it checks that live tracker, not the database.
-	// Confirmed directly: prior to this fix, Scope.AddNetblock() had no
-	// real callers anywhere in the codebase for dynamically-discovered
-	// netblocks.
-	e.Session.Scope().AddNetblock(netblock)
+	// Confirmed directly: prior to this fix, the concrete Scope.AddNetblock()
+	// method (called internally by the Add() interface method used below)
+	// had no real callers anywhere in the codebase for dynamically-
+	// discovered netblocks. Add() is used here, not AddNetblock() directly,
+	// because et.Scope - the interface type e.Session.Scope() actually
+	// returns - only exposes the generic Add(oam.Asset), which internally
+	// type-switches to AddNetblock() for a *oamnet.Netblock; AddNetblock()
+	// itself exists only on the concrete scope.Scope struct, not the
+	// interface.
+	e.Session.Scope().Add(netblock)
 
 	_, _ = e.Session.DB().CreateEntityProperty(ctx, nb, &general.SourceProperty{
 		Source:     entry.Src.Name,
