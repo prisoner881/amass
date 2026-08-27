@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
-	"os"
 	"time"
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
@@ -130,31 +129,6 @@ func (d *ipNetblock) store(e *et.Event, entry *sessions.CIDRangerEntry) (*dbt.En
 		return nil, nil
 	}
 
-	// TEMPORARY DIAGNOSTIC - remove once the missing-netblock-scope
-	// investigation is resolved. Writes directly to stderr, bypassing
-	// the same log-visibility gap confirmed multiple times already.
-	// Now calls e.Session.DB().IncomingEdges directly, alongside
-	// support.ResolvingFQDNs, specifically to surface any error that
-	// ResolvingFQDNs itself silently swallows (its own contract:
-	// "returns nil if none exist OR the lookup fails" - genuinely
-	// indistinguishable from the caller's side without this). Also
-	// logs e.Entity.ID directly - the actual database row ID
-	// IncomingEdges uses internally (via strconv.ParseInt) to look up
-	// edges - since that's a completely different value from
-	// e.Entity.Asset.Key() (a content-derived string, e.g. the IP
-	// itself), and a stale, empty, or invalid ID here would explain a
-	// silent lookup failure that Asset.Key() alone could never reveal.
-	{
-		rawEdges, rawErr := e.Session.DB().IncomingEdges(ctx, e.Entity, time.Time{}, "dns_record")
-		fqdns := support.ResolvingFQDNs(ctx, e.Session, e.Entity)
-		fmt.Fprintf(os.Stderr, "DEBUG ip_netblock store() ip=%v entityID=%q netblock=%v resolvingFQDNs=%d rawEdgeCount=%d rawErr=%v\n",
-			e.Entity.Asset.Key(), e.Entity.ID, netblock.CIDR.String(), len(fqdns), len(rawEdges), rawErr)
-		for _, fqdn := range fqdns {
-			_, conf := e.Session.Scope().IsAssetInScope(fqdn, 0)
-			fmt.Fprintf(os.Stderr, "DEBUG ip_netblock store()   fqdn=%v inScopeConf=%d\n", fqdn.Name, conf)
-		}
-	}
-
 	// Registers the discovered netblock with the session's live scope
 	// tracker (e.Session.Scope()), not just the database - but only
 	// when the IP that triggered this discovery genuinely traces back
@@ -175,9 +149,6 @@ func (d *ipNetblock) store(e *et.Event, entry *sessions.CIDRangerEntry) (*dbt.En
 	// shared with whois/bgptools/netblock.go's identical situation.
 	if support.HasInScopeFQDN(ctx, e.Session, e.Entity) {
 		e.Session.Scope().Add(netblock)
-		fmt.Fprintf(os.Stderr, "DEBUG ip_netblock store() ADDED netblock=%v to scope\n", netblock.CIDR.String())
-	} else {
-		fmt.Fprintf(os.Stderr, "DEBUG ip_netblock store() SKIPPED netblock=%v (not in scope)\n", netblock.CIDR.String())
 	}
 
 	_, _ = e.Session.DB().CreateEntityProperty(ctx, nb, &general.SourceProperty{
