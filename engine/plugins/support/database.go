@@ -212,3 +212,36 @@ func CreateServiceAsset(session et.Session, src *dbt.Entity, rel oam.Relation, s
 	})
 	return match, err
 }
+
+// HasInScopeFQDN checks whether at least one FQDN with a dns_record
+// edge pointing at the given entity (expected to be an IPAddress) is
+// itself confirmed in scope. This is the deliberate, targeted gate for
+// netblock scope registration in ip_netblock.go and
+// whois/bgptools/netblock.go - see the comment on the Scope.Add() call
+// site in ip_netblock.go for the full reasoning. An IP discovered via
+// a genuine forward DNS resolution from an in-scope domain passes; an
+// IP that only has a reverse-DNS (ptr_record) path, or no in-scope
+// FQDN pointing to it at all, does not - PTR records are a well-known
+// unreliable signal for this purpose (frequently misconfigured,
+// pointing at unrelated organizations), so a bare reverse-DNS hit
+// alone deliberately isn't treated as sufficient here.
+func HasInScopeFQDN(ctx context.Context, session et.Session, ent *dbt.Entity) bool {
+	edges, err := session.DB().IncomingEdges(ctx, ent, time.Time{}, "dns_record")
+	if err != nil {
+		return false
+	}
+
+	for _, edge := range edges {
+		if edge.FromEntity == nil {
+			continue
+		}
+		fqdn, ok := edge.FromEntity.Asset.(*oamdns.FQDN)
+		if !ok {
+			continue
+		}
+		if _, conf := session.Scope().IsAssetInScope(fqdn, 0); conf > 0 {
+			return true
+		}
+	}
+	return false
+}
