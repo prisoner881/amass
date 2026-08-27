@@ -9,6 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"math/big"
 	"net"
+	"sync"
 	"testing"
 	"time"
 )
@@ -77,7 +78,7 @@ func TestDialAndGetCertChain_RealHandshake(t *testing.T) {
 	cert := generateSelfSignedCert(t, cn)
 	addr := startTLSServer(t, cert)
 
-	certs, err := dialAndGetCertChain(context.Background(), nil, addr, 2*time.Second)
+	certs, err := dialAndGetCertChain(context.Background(), nil, addr, "", 2*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -111,7 +112,7 @@ func TestDialAndGetCertChain_PlainTCPRefusesGracefully(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 	}()
 
-	_, err = dialAndGetCertChain(context.Background(), nil, ln.Addr().String(), 1*time.Second)
+	_, err = dialAndGetCertChain(context.Background(), nil, ln.Addr().String(), "", 1*time.Second)
 	if err == nil {
 		t.Fatal("expected an error connecting to a non-TLS port, got nil")
 	}
@@ -125,7 +126,7 @@ func TestDialAndGetCertChain_ConnectionRefused(t *testing.T) {
 	addr := ln.Addr().String()
 	ln.Close()
 
-	_, err = dialAndGetCertChain(context.Background(), nil, addr, 2*time.Second)
+	_, err = dialAndGetCertChain(context.Background(), nil, addr, "", 2*time.Second)
 	if err == nil {
 		t.Fatal("expected a connection error, got nil")
 	}
@@ -146,7 +147,7 @@ func TestDialAndGetCertChain_UsesInjectedDialer(t *testing.T) {
 	// unreachableAddr is passed as the target - if this function
 	// ignored the injected dialer and dialed directly, this would fail
 	// rather than succeeding via the redirect.
-	certs, err := dialAndGetCertChain(context.Background(), dial, unreachableAddr, 2*time.Second)
+	certs, err := dialAndGetCertChain(context.Background(), dial, unreachableAddr, "", 2*time.Second)
 
 	if !*called {
 		t.Fatal("injected dialer was never invoked - dialAndGetCertChain is not using the supplied dial function")
@@ -167,12 +168,117 @@ func TestDialAndGetCertChain_NilDialerFallsBackToDirect(t *testing.T) {
 	cert := generateSelfSignedCert(t, cn)
 	addr := startTLSServer(t, cert)
 
-	certs, err := dialAndGetCertChain(context.Background(), nil, addr, 2*time.Second)
+	certs, err := dialAndGetCertChain(context.Background(), nil, addr, "", 2*time.Second)
 
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if len(certs) != 1 || certs[0].Subject.CommonName != cn {
 		t.Errorf("did not correctly reach the real server via the direct fallback dialer")
+	}
+}
+
+// TestDialAndGetCertChain_SendsCorrectSNI proves serverName is
+// genuinely transmitted in the TLS ClientHello's SNI extension, not
+// just accepted as a parameter that goes nowhere. Uses the server
+// side's own GetCertificate callback - which the Go standard library
+// invokes with the real, received ClientHelloInfo, including whatever
+// SNI value the client actually sent - as the ground truth, rather
+// than trusting the client's own account of what it did.
+func TestDialAndGetCertChain_SendsCorrectSNI(t *testing.T) {
+	const cn = "sni-capture-test.example.com"
+	cert := generateSelfSignedCert(t, cn)
+
+	var mu sync.Mutex
+	var capturedSNI string
+
+	config := &tls.Config{
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			mu.Lock()
+			capturedSNI = hello.ServerName
+			mu.Unlock()
+			return &cert, nil
+		},
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", config)
+	if err != nil {
+		t.Fatalf("failed to start TLS listener: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if tconn, ok := conn.(*tls.Conn); ok {
+			_ = tconn.Handshake()
+		}
+		time.Sleep(300 * time.Millisecond)
+	}()
+
+	const expectedSNI = "the-resolved-hostname.example.com"
+	_, err = dialAndGetCertChain(context.Background(), nil, ln.Addr().String(), expectedSNI, 2*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if capturedSNI != expectedSNI {
+		t.Errorf("server received SNI %q, want %q - dialAndGetCertChain is not correctly passing serverName through to the TLS handshake",
+			capturedSNI, expectedSNI)
+	}
+}
+
+// TestDialAndGetCertChain_EmptyServerNameOmitsSNI confirms the other
+// half of the contract: an empty serverName (the case when no
+// resolving FQDN was found for a bare IP) results in no SNI extension
+// being sent at all, exactly matching this function's behavior before
+// serverName existed - not an empty-string SNI value, which is a
+// different, invalid thing entirely.
+func TestDialAndGetCertChain_EmptyServerNameOmitsSNI(t *testing.T) {
+	const cn = "no-sni-test.example.com"
+	cert := generateSelfSignedCert(t, cn)
+
+	var mu sync.Mutex
+	sniWasSet := false
+
+	config := &tls.Config{
+		GetCertificate: func(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
+			mu.Lock()
+			sniWasSet = hello.ServerName != ""
+			mu.Unlock()
+			return &cert, nil
+		},
+	}
+	ln, err := tls.Listen("tcp", "127.0.0.1:0", config)
+	if err != nil {
+		t.Fatalf("failed to start TLS listener: %v", err)
+	}
+	defer ln.Close()
+
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if tconn, ok := conn.(*tls.Conn); ok {
+			_ = tconn.Handshake()
+		}
+		time.Sleep(300 * time.Millisecond)
+	}()
+
+	_, err = dialAndGetCertChain(context.Background(), nil, ln.Addr().String(), "", 2*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if sniWasSet {
+		t.Error("expected no SNI extension when serverName is empty, but the server received one")
 	}
 }

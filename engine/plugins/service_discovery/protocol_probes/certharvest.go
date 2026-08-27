@@ -67,7 +67,19 @@ func HarvestCertificate(e *et.Event, dial amassnet.DialContext, parent *dbt.Enti
 		return nil
 	}
 
-	certs, err := dialAndGetCertChain(e.Session.Ctx(), dial, addr, timeout)
+	// Deliberately not assuming anything about which port a server
+	// "should" run on - a raw TLS handshake is attempted unconditionally
+	// here, regardless of port number, since the whole point of active
+	// probing over convention is catching services that don't run where
+	// convention would predict. serverName, when one is available,
+	// gives that handshake the same fair chance a normal, hostname-
+	// driven client would have: many modern, virtually-hosted TLS
+	// servers require a correct SNI value to select which certificate
+	// to present, and can reset or refuse a bare-IP connection that
+	// arrives without one - see support.PreferredSNIHostname.
+	serverName := support.PreferredSNIHostname(ctx, e.Session, parent)
+
+	certs, err := dialAndGetCertChain(e.Session.Ctx(), dial, addr, serverName, timeout)
 	if err != nil {
 		return err
 	}
@@ -88,12 +100,18 @@ func HarvestCertificate(e *et.Event, dial amassnet.DialContext, parent *dbt.Enti
 // standard approach for TLS over an already-established connection
 // from a custom dialer.
 //
+// serverName populates the TLS ClientHello's SNI extension when
+// non-empty - see HarvestCertificate's own comment and
+// support.PreferredSNIHostname for the full reasoning. An empty
+// serverName omits SNI entirely, identical to this function's
+// behavior before this parameter existed.
+//
 // InsecureSkipVerify is intentional, not an oversight: the goal here is
 // harvesting whatever certificate a host presents, including expired,
 // self-signed, or otherwise untrusted ones - that data is still real
 // and worth recording - not validating whether the connection should
 // be trusted the way a normal TLS client would.
-func dialAndGetCertChain(ctx context.Context, dial amassnet.DialContext, addr string, timeout time.Duration) ([]*x509.Certificate, error) {
+func dialAndGetCertChain(ctx context.Context, dial amassnet.DialContext, addr, serverName string, timeout time.Duration) ([]*x509.Certificate, error) {
 	if dial == nil {
 		dial = amassnet.NewDialContext(timeout)
 	}
@@ -108,7 +126,7 @@ func dialAndGetCertChain(ctx context.Context, dial amassnet.DialContext, addr st
 		return nil, err
 	}
 
-	tlsConn := tls.Client(rawConn, &tls.Config{InsecureSkipVerify: true})
+	tlsConn := tls.Client(rawConn, &tls.Config{InsecureSkipVerify: true, ServerName: serverName})
 	if err := tlsConn.HandshakeContext(ctx); err != nil {
 		return nil, err
 	}
