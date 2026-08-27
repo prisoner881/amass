@@ -213,6 +213,30 @@ func CreateServiceAsset(session et.Session, src *dbt.Entity, rel oam.Relation, s
 	return match, err
 }
 
+// ResolvingFQDNs returns every FQDN with a dns_record edge pointing at
+// the given entity (expected to be an IPAddress). Shared low-level
+// primitive behind HasInScopeFQDN below and PreferredSNIHostname in
+// certharvest.go - both need the same underlying lookup, just for
+// different purposes (a scope-membership check vs. picking a hostname
+// to present via SNI). Returns nil if none exist or the lookup fails.
+func ResolvingFQDNs(ctx context.Context, session et.Session, ent *dbt.Entity) []*oamdns.FQDN {
+	edges, err := session.DB().IncomingEdges(ctx, ent, time.Time{}, "dns_record")
+	if err != nil {
+		return nil
+	}
+
+	var fqdns []*oamdns.FQDN
+	for _, edge := range edges {
+		if edge.FromEntity == nil {
+			continue
+		}
+		if fqdn, ok := edge.FromEntity.Asset.(*oamdns.FQDN); ok {
+			fqdns = append(fqdns, fqdn)
+		}
+	}
+	return fqdns
+}
+
 // HasInScopeFQDN checks whether at least one FQDN with a dns_record
 // edge pointing at the given entity (expected to be an IPAddress) is
 // itself confirmed in scope. This is the deliberate, targeted gate for
@@ -226,22 +250,36 @@ func CreateServiceAsset(session et.Session, src *dbt.Entity, rel oam.Relation, s
 // pointing at unrelated organizations), so a bare reverse-DNS hit
 // alone deliberately isn't treated as sufficient here.
 func HasInScopeFQDN(ctx context.Context, session et.Session, ent *dbt.Entity) bool {
-	edges, err := session.DB().IncomingEdges(ctx, ent, time.Time{}, "dns_record")
-	if err != nil {
-		return false
-	}
-
-	for _, edge := range edges {
-		if edge.FromEntity == nil {
-			continue
-		}
-		fqdn, ok := edge.FromEntity.Asset.(*oamdns.FQDN)
-		if !ok {
-			continue
-		}
+	for _, fqdn := range ResolvingFQDNs(ctx, session, ent) {
 		if _, conf := session.Scope().IsAssetInScope(fqdn, 0); conf > 0 {
 			return true
 		}
 	}
 	return false
+}
+
+// PreferredSNIHostname picks the best available hostname to present
+// via SNI when initiating a raw TLS handshake against a bare IP -
+// preferring one that's confirmed in scope (most likely the actual,
+// intended target of this enumeration), falling back to any resolving
+// hostname otherwise. Returns an empty string if no resolving FQDN
+// exists at all (e.g. an IP discovered via netblock sweep with no
+// forward DNS record of its own), meaning the caller should omit SNI
+// entirely - many modern, virtually-hosted TLS servers require a
+// correct SNI value to know which certificate to present, and may
+// reset or refuse a connection that arrives without one; this exists
+// specifically to give a raw TLS handshake against a bare IP the same
+// chance of success that a normal, hostname-driven client would have.
+func PreferredSNIHostname(ctx context.Context, session et.Session, ent *dbt.Entity) string {
+	fqdns := ResolvingFQDNs(ctx, session, ent)
+	if len(fqdns) == 0 {
+		return ""
+	}
+
+	for _, fqdn := range fqdns {
+		if _, conf := session.Scope().IsAssetInScope(fqdn, 0); conf > 0 {
+			return fqdn.Name
+		}
+	}
+	return fqdns[0].Name
 }
