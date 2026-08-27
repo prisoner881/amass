@@ -130,21 +130,26 @@ func (d *ipNetblock) store(e *et.Event, entry *sessions.CIDRangerEntry) (*dbt.En
 	}
 
 	// Registers the discovered netblock with the session's live scope
-	// tracker (e.Session.Scope()), not just the database. Without this,
-	// Scope.Netblocks() stays permanently empty regardless of how many
-	// Netblock entities get created - IsAssetInScope() for any IPAddress
-	// falling within a genuinely in-scope netblock would always report
-	// out-of-scope, since it checks that live tracker, not the database.
-	// Confirmed directly: prior to this fix, the concrete Scope.AddNetblock()
-	// method (called internally by the Add() interface method used below)
-	// had no real callers anywhere in the codebase for dynamically-
-	// discovered netblocks. Add() is used here, not AddNetblock() directly,
-	// because et.Scope - the interface type e.Session.Scope() actually
-	// returns - only exposes the generic Add(oam.Asset), which internally
-	// type-switches to AddNetblock() for a *oamnet.Netblock; AddNetblock()
-	// itself exists only on the concrete scope.Scope struct, not the
-	// interface.
-	e.Session.Scope().Add(netblock)
+	// tracker (e.Session.Scope()), not just the database - but only
+	// when the IP that triggered this discovery genuinely traces back
+	// to something already in scope. This plugin fires unconditionally
+	// on every IPAddress the pipeline ever touches, including IPs
+	// resolved from completely out-of-scope, incidentally-discovered
+	// FQDNs (a shared CDN or third-party service some unrelated domain
+	// happens to use). Without this gate, that unconditional firing -
+	// harmless before Scope.Add() actually worked, since nothing read
+	// its result - now means any netblock touched by any IP resolution
+	// anywhere gets permanently registered as in-scope, and every other
+	// IP sharing that (often huge, shared) range becomes in-scope too
+	// via the normal, correct containment check. Confirmed directly
+	// against a real enumeration: this was the complete, actual
+	// mechanism behind Cloudflare/AWS/Azure/Google/GitHub ranges, and
+	// entirely unrelated third-party infrastructure, all ending up
+	// marked in-scope. See support.HasInScopeFQDN for the actual check,
+	// shared with whois/bgptools/netblock.go's identical situation.
+	if support.HasInScopeFQDN(ctx, e.Session, e.Entity) {
+		e.Session.Scope().Add(netblock)
+	}
 
 	_, _ = e.Session.DB().CreateEntityProperty(ctx, nb, &general.SourceProperty{
 		Source:     entry.Src.Name,
