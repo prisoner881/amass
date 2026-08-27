@@ -9,6 +9,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"net"
+	"strconv"
 	"time"
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
@@ -42,6 +44,22 @@ var harvestSource = &et.Source{Name: "Protocol-Probes", Confidence: 80}
 // harvested for it (the dedup guard - this is what avoids redundant
 // work against ports http_probes already covers, typically 443), and
 // otherwise perform the handshake and store whatever chain comes back.
+//
+// addr is deliberately the bare IP address, not a host:port string -
+// FindOrCreateService (via support.ServiceWithIdentifier) appends the
+// port itself, matching the exact same unique_id convention
+// http_probes already uses for its own Service entities on the same
+// host:port. Passing an already-combined host:port string here was a
+// real, genuine bug this function used to have: it produced a
+// different, malformed ID ("addr:port:tcp:port-hash" instead of
+// "addr:tcp:port-hash") that could never match http_probes' own
+// entries - meaning the dedup guard above could never actually see
+// that a certificate had already been harvested, since it was always
+// checking a distinct, never-before-seen entity. Confirmed directly
+// against a real enumeration: duplicate tls Service rows existed
+// alongside http_probes' web-service rows for the identical host:port.
+// The host:port string this function actually needs for dialing gets
+// constructed internally, below, right before it's used.
 //
 // dial is the same injected amassnet.DialContext used by PeekBanner,
 // for the same reason: this is active-only traffic that must be able
@@ -79,7 +97,8 @@ func HarvestCertificate(e *et.Event, dial amassnet.DialContext, parent *dbt.Enti
 	// arrives without one - see support.PreferredSNIHostname.
 	serverName := support.PreferredSNIHostname(ctx, e.Session, parent)
 
-	certs, err := dialAndGetCertChain(e.Session.Ctx(), dial, addr, serverName, timeout)
+	target := net.JoinHostPort(addr, strconv.Itoa(port))
+	certs, err := dialAndGetCertChain(e.Session.Ctx(), dial, target, serverName, timeout)
 	if err != nil {
 		return err
 	}

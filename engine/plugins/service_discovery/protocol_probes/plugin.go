@@ -221,8 +221,15 @@ func (pp *protocolProbes) probeOnePort(e *et.Event, dial amassnet.DialContext, a
 		// signature of HTTPS or any other implicit-TLS protocol.
 		// certharvest.go's own dedup guard means this is a genuine
 		// no-op, not wasted work, if http_probes already harvested a
-		// certificate here.
-		if err := HarvestCertificate(e, dial, e.Entity, target, port, PeekTimeout); err != nil {
+		// certificate here. addr (bare IP), not target (host:port), is
+		// passed here deliberately - HarvestCertificate constructs its
+		// own dial target internally now, from addr and port
+		// separately, so its Service entity's unique_id matches
+		// http_probes' own convention and the dedup guard can actually
+		// see what http_probes already harvested. See
+		// HarvestCertificate's own doc comment for the full reasoning
+		// behind this fix.
+		if err := HarvestCertificate(e, dial, e.Entity, addr, port, PeekTimeout); err != nil {
 			// TEMPORARY DIAGNOSTIC - remove once the missing-certificate
 			// investigation is resolved. Writes directly to stderr,
 			// bypassing the same log-visibility gap confirmed for
