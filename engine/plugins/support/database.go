@@ -219,6 +219,21 @@ func CreateServiceAsset(session et.Session, src *dbt.Entity, rel oam.Relation, s
 // certharvest.go - both need the same underlying lookup, just for
 // different purposes (a scope-membership check vs. picking a hostname
 // to present via SNI). Returns nil if none exist or the lookup fails.
+//
+// The extra FindEntityById call per edge is required, not optional -
+// confirmed directly against the real asset-db source (both its
+// current default branch and v0.24.4, the specific version this
+// project pins): IncomingEdges/OutgoingEdges never hydrate
+// FromEntity/ToEntity beyond a bare ID. Their own edge construction
+// literally only sets &dbt.Entity{ID: ...} - .Asset is always nil on
+// what they return directly, regardless of how long the edge has
+// existed or which session created it. Using edge.FromEntity.Asset
+// directly, without this lookup, was a real, genuine bug this
+// function used to have: every single call silently returned zero
+// FQDNs, for every target, every time - confirmed directly via a live
+// diagnostic showing IncomingEdges itself correctly finding real
+// edges (rawEdgeCount=2, rawErr=<nil>) while this function's own
+// original logic still produced zero usable FQDNs from them.
 func ResolvingFQDNs(ctx context.Context, session et.Session, ent *dbt.Entity) []*oamdns.FQDN {
 	edges, err := session.DB().IncomingEdges(ctx, ent, time.Time{}, "dns_record")
 	if err != nil {
@@ -230,7 +245,11 @@ func ResolvingFQDNs(ctx context.Context, session et.Session, ent *dbt.Entity) []
 		if edge.FromEntity == nil {
 			continue
 		}
-		if fqdn, ok := edge.FromEntity.Asset.(*oamdns.FQDN); ok {
+		fromEnt, err := session.DB().FindEntityById(ctx, edge.FromEntity.ID)
+		if err != nil || fromEnt == nil {
+			continue
+		}
+		if fqdn, ok := fromEnt.Asset.(*oamdns.FQDN); ok {
 			fqdns = append(fqdns, fqdn)
 		}
 	}
