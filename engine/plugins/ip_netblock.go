@@ -133,15 +133,22 @@ func (d *ipNetblock) store(e *et.Event, entry *sessions.CIDRangerEntry) (*dbt.En
 	// TEMPORARY DIAGNOSTIC - remove once the missing-netblock-scope
 	// investigation is resolved. Writes directly to stderr, bypassing
 	// the same log-visibility gap confirmed multiple times already.
-	// Checks support.ResolvingFQDNs and IsAssetInScope individually, in
-	// addition to the actual HasInScopeFQDN call below, so we can see
-	// exactly where a real dns_record edge (independently confirmed via
-	// direct SQL query to exist) stops producing an in-scope result -
-	// rather than only seeing HasInScopeFQDN's final true/false.
+	// Now calls e.Session.DB().IncomingEdges directly, alongside
+	// support.ResolvingFQDNs, specifically to surface any error that
+	// ResolvingFQDNs itself silently swallows (its own contract:
+	// "returns nil if none exist OR the lookup fails" - genuinely
+	// indistinguishable from the caller's side without this). Also
+	// logs e.Entity.ID directly - the actual database row ID
+	// IncomingEdges uses internally (via strconv.ParseInt) to look up
+	// edges - since that's a completely different value from
+	// e.Entity.Asset.Key() (a content-derived string, e.g. the IP
+	// itself), and a stale, empty, or invalid ID here would explain a
+	// silent lookup failure that Asset.Key() alone could never reveal.
 	{
+		rawEdges, rawErr := e.Session.DB().IncomingEdges(ctx, e.Entity, time.Time{}, "dns_record")
 		fqdns := support.ResolvingFQDNs(ctx, e.Session, e.Entity)
-		fmt.Fprintf(os.Stderr, "DEBUG ip_netblock store() ip=%v netblock=%v resolvingFQDNs=%d\n",
-			e.Entity.Asset.Key(), netblock.CIDR.String(), len(fqdns))
+		fmt.Fprintf(os.Stderr, "DEBUG ip_netblock store() ip=%v entityID=%q netblock=%v resolvingFQDNs=%d rawEdgeCount=%d rawErr=%v\n",
+			e.Entity.Asset.Key(), e.Entity.ID, netblock.CIDR.String(), len(fqdns), len(rawEdges), rawErr)
 		for _, fqdn := range fqdns {
 			_, conf := e.Session.Scope().IsAssetInScope(fqdn, 0)
 			fmt.Fprintf(os.Stderr, "DEBUG ip_netblock store()   fqdn=%v inScopeConf=%d\n", fqdn.Name, conf)
