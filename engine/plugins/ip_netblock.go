@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"os"
 	"time"
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
@@ -129,6 +130,24 @@ func (d *ipNetblock) store(e *et.Event, entry *sessions.CIDRangerEntry) (*dbt.En
 		return nil, nil
 	}
 
+	// TEMPORARY DIAGNOSTIC - remove once the missing-netblock-scope
+	// investigation is resolved. Writes directly to stderr, bypassing
+	// the same log-visibility gap confirmed multiple times already.
+	// Checks support.ResolvingFQDNs and IsAssetInScope individually, in
+	// addition to the actual HasInScopeFQDN call below, so we can see
+	// exactly where a real dns_record edge (independently confirmed via
+	// direct SQL query to exist) stops producing an in-scope result -
+	// rather than only seeing HasInScopeFQDN's final true/false.
+	{
+		fqdns := support.ResolvingFQDNs(ctx, e.Session, e.Entity)
+		fmt.Fprintf(os.Stderr, "DEBUG ip_netblock store() ip=%v netblock=%v resolvingFQDNs=%d\n",
+			e.Entity.Asset.Key(), netblock.CIDR.String(), len(fqdns))
+		for _, fqdn := range fqdns {
+			_, conf := e.Session.Scope().IsAssetInScope(fqdn, 0)
+			fmt.Fprintf(os.Stderr, "DEBUG ip_netblock store()   fqdn=%v inScopeConf=%d\n", fqdn.Name, conf)
+		}
+	}
+
 	// Registers the discovered netblock with the session's live scope
 	// tracker (e.Session.Scope()), not just the database - but only
 	// when the IP that triggered this discovery genuinely traces back
@@ -149,6 +168,9 @@ func (d *ipNetblock) store(e *et.Event, entry *sessions.CIDRangerEntry) (*dbt.En
 	// shared with whois/bgptools/netblock.go's identical situation.
 	if support.HasInScopeFQDN(ctx, e.Session, e.Entity) {
 		e.Session.Scope().Add(netblock)
+		fmt.Fprintf(os.Stderr, "DEBUG ip_netblock store() ADDED netblock=%v to scope\n", netblock.CIDR.String())
+	} else {
+		fmt.Fprintf(os.Stderr, "DEBUG ip_netblock store() SKIPPED netblock=%v (not in scope)\n", netblock.CIDR.String())
 	}
 
 	_, _ = e.Session.DB().CreateEntityProperty(ctx, nb, &general.SourceProperty{
