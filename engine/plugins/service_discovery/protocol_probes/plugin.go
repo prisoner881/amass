@@ -205,10 +205,23 @@ func (pp *protocolProbes) check(e *et.Event) error {
 func (pp *protocolProbes) probeOnePort(e *et.Event, dial amassnet.DialContext, addr string, port int) {
 	target := net.JoinHostPort(addr, strconv.Itoa(port))
 
+	// TEMPORARY DIAGNOSTIC - remove once the missing-port investigation
+	// is resolved. Confirms whether a specific port is even being
+	// attempted at all, and if so, exactly what PeekBanner returned -
+	// needed because cert-harvest-failed (the existing diagnostic)
+	// only ever fires on the GuessSilent path, telling us nothing about
+	// a port that goes through GuessSSH/GuessAmbiguousBanner, or one
+	// that fails during the peek itself before classification ever
+	// happens.
+	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes probeOnePort target=%v\n", target)
+
 	result := PeekBanner(e.Session.Ctx(), dial, target, PeekTimeout)
 	if result.Err != nil {
+		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes probeOnePort target=%v PEEK_ERROR=%v\n", target, result.Err)
 		return
 	}
+	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes probeOnePort target=%v classification=%v dataLen=%d\n",
+		target, ClassifyPeek(result.Data), len(result.Data))
 
 	switch ClassifyPeek(result.Data) {
 	case GuessSSH:
