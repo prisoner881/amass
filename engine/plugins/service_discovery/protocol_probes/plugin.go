@@ -223,6 +223,13 @@ func (pp *protocolProbes) probeOnePort(e *et.Event, dial amassnet.DialContext, a
 		// no-op, not wasted work, if http_probes already harvested a
 		// certificate here.
 		if err := HarvestCertificate(e, dial, e.Entity, target, port, PeekTimeout); err != nil {
+			// TEMPORARY DIAGNOSTIC - remove once the missing-certificate
+			// investigation is resolved. Writes directly to stderr,
+			// bypassing the same log-visibility gap confirmed for
+			// "Plugin started" and the association rationale earlier -
+			// pp.log.Warn on the line below has never once shown up in
+			// either docker logs engine or docker logs syslog.
+			fmt.Fprintf(os.Stderr, "DEBUG protocol_probes cert-harvest-failed target=%v error=%v\n", target, err)
 			pp.log.Warn("certificate harvest failed", "target", target, "error", err.Error())
 		}
 	}
