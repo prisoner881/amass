@@ -281,6 +281,27 @@ func (pp *protocolProbes) handleAmbiguousBanner(e *et.Event, addr string, port i
 // if Recog recognizes the banner against any of the given databases,
 // creates the corresponding Product/ProductRelease entities.
 func (pp *protocolProbes) storeServiceAndIdentify(e *et.Event, addr string, port int, svcType, banner string, dbNames []string) {
+	// TEMPORARY DIAGNOSTIC - remove once the binary-banner storage
+	// investigation is resolved. The recover() here is the direct way
+	// to answer the open question from the prior diagnostic: since
+	// neither a database row nor the existing err!=nil log line ever
+	// appeared for MySQL's binary handshake, a panic somewhere in this
+	// function (or something it calls) - silently caught by an outer
+	// recovery in the pipeline/dispatcher framework, a common,
+	// sensible pattern to keep one bad handler from taking down the
+	// whole engine - is the remaining, most likely explanation. This
+	// recover() sits closer to the source, so it catches the panic
+	// first and can print exactly what it is, rather than only
+	// inferring one exists from silence.
+	defer func() {
+		if r := recover(); r != nil {
+			fmt.Fprintf(os.Stderr, "DEBUG protocol_probes storeServiceAndIdentify PANICKED addr=%v port=%v recovered=%v bannerLen=%d bannerQuoted=%q\n",
+				addr, port, r, len(banner), banner)
+		}
+	}()
+	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes storeServiceAndIdentify ENTERED addr=%v port=%v svcType=%v bannerLen=%d\n",
+		addr, port, svcType, len(banner))
+
 	svcEntity, err := FindOrCreateService(e, e.Entity, addr, port, svcType, banner)
 	if err != nil {
 		// TEMPORARY DIAGNOSTIC - remove once the binary-banner storage
