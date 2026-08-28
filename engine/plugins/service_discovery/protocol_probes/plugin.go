@@ -283,6 +283,16 @@ func (pp *protocolProbes) handleAmbiguousBanner(e *et.Event, addr string, port i
 func (pp *protocolProbes) storeServiceAndIdentify(e *et.Event, addr string, port int, svcType, banner string, dbNames []string) {
 	svcEntity, err := FindOrCreateService(e, e.Entity, addr, port, svcType, banner)
 	if err != nil {
+		// TEMPORARY DIAGNOSTIC - remove once the binary-banner storage
+		// investigation is resolved. Writes directly to stderr for the
+		// same reason as every other diagnostic in this file - pp.log
+		// output has never once shown up in docker logs for either
+		// container, confirmed repeatedly. %q on the raw banner
+		// specifically to surface whether a null byte or other
+		// non-UTF8 content (expected for binary protocols like MySQL's
+		// handshake) is what's actually causing CreateAsset to fail.
+		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes storeServiceAndIdentify FAILED addr=%v port=%v error=%v bannerLen=%d bannerQuoted=%q\n",
+			addr, port, err, len(banner), banner)
 		pp.log.Warn("failed to store the Service asset", "addr", addr, "port", port, "error", err.Error())
 		return
 	}
