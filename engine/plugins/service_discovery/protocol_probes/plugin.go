@@ -11,6 +11,7 @@ import (
 	"net"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
@@ -227,7 +228,19 @@ func (pp *protocolProbes) probeOnePort(e *et.Event, dial amassnet.DialContext, a
 	case GuessSSH:
 		pp.handleSSH(e, addr, port, string(result.Data))
 	case GuessAmbiguousBanner:
-		pp.handleAmbiguousBanner(e, addr, port, string(result.Data))
+		// TEMPORARY DIAGNOSTIC - remove once the binary-banner storage
+		// investigation is resolved. Isolates whether the gap is
+		// between this switch case being entered and
+		// handleAmbiguousBanner actually being called, or something
+		// even earlier - storeServiceAndIdentify's own "ENTERED" line
+		// (the very first statement in that function) never printed
+		// for MySQL's binary handshake across three separate,
+		// consistent runs, despite this exact code path working
+		// correctly for FTP and SMTP banners.
+		banner := string(result.Data)
+		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes switch GuessAmbiguousBanner target=%v bannerLen=%d\n", target, len(banner))
+		pp.handleAmbiguousBanner(e, addr, port, banner)
+		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes switch GuessAmbiguousBanner target=%v handleAmbiguousBanner RETURNED\n", target)
 	case GuessSilent:
 		// Consistent with existing implicit-TLS ports: a service that
 		// sends nothing before the client speaks is exactly the
@@ -302,7 +315,22 @@ func (pp *protocolProbes) storeServiceAndIdentify(e *et.Event, addr string, port
 	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes storeServiceAndIdentify ENTERED addr=%v port=%v svcType=%v bannerLen=%d\n",
 		addr, port, svcType, len(banner))
 
-	svcEntity, err := FindOrCreateService(e, e.Entity, addr, port, svcType, banner)
+	// Postgres text columns cannot store an embedded null byte at all -
+	// not a soft validation concern, a hard, unconditional rejection
+	// independent of UTF-8 validity (a null byte is itself valid
+	// UTF-8; this is a separate, storage-layer constraint from
+	// Postgres's own C-style string internals). Binary protocols like
+	// MySQL's handshake routinely embed one (a NUL-terminated server
+	// version string, by protocol specification), so a raw binary
+	// banner can fail to store entirely otherwise. Deliberately scoped
+	// to only the value handed to FindOrCreateService - banner itself,
+	// used below for MatchAnyBanner, stays completely untouched, since
+	// Recog's fingerprint patterns may depend on exact byte structure
+	// and offsets that this stripping would otherwise disturb for the
+	// sake of a storage-only concern.
+	storableBanner := strings.ReplaceAll(banner, "\x00", "")
+
+	svcEntity, err := FindOrCreateService(e, e.Entity, addr, port, svcType, storableBanner)
 	if err != nil {
 		// TEMPORARY DIAGNOSTIC - remove once the binary-banner storage
 		// investigation is resolved. Writes directly to stderr for the
