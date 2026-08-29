@@ -6,10 +6,8 @@ package protocol_probes
 
 import (
 	"errors"
-	"fmt"
 	"log/slog"
 	"net"
-	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -135,15 +133,8 @@ func (pp *protocolProbes) Stop() {
 }
 
 func (pp *protocolProbes) check(e *et.Event) error {
-	// TEMPORARY DIAGNOSTIC - remove once the missing-Service investigation
-	// is resolved. Writes directly to stderr, bypassing any uncertainty
-	// about where slog/syslog output actually ends up, to answer one
-	// specific question: is this function being called at all.
-	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes check() called for %v\n", e.Entity.Asset.Key())
-
 	ip, ok := e.Entity.Asset.(*oamnet.IPAddress)
 	if !ok {
-		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes EXIT type-assertion for %v\n", e.Entity.Asset.Key())
 		return errors.New("failed to extract the IPAddress asset")
 	}
 
@@ -151,41 +142,26 @@ func (pp *protocolProbes) check(e *et.Event) error {
 	// the target directly) - gated on -active the same way every other
 	// active-probing plugin in this codebase already is.
 	if !e.Session.Config().Active {
-		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes EXIT not-active for %v\n", ip.Address.String())
 		return nil
 	}
 
 	if _, conf := e.Session.Scope().IsAssetInScope(e.Entity.Asset, 0); conf <= 0 {
-		nblocks := e.Session.Scope().Netblocks()
-		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes EXIT out-of-scope (conf=%d, known_netblocks=%d) for %v\n", conf, len(nblocks), ip.Address.String())
-		for _, nb := range nblocks {
-			if nb.CIDR.Contains(ip.Address) {
-				fmt.Fprintf(os.Stderr, "DEBUG protocol_probes MATCHING NETBLOCK EXISTS BUT WASN'T MATCHED: %v contains %v\n", nb.CIDR, ip.Address)
-			}
-		}
 		return nil
 	}
 
 	ports := e.Session.Config().Scope.Ports
 	if len(ports) == 0 {
-		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes EXIT zero-ports for %v\n", ip.Address.String())
 		return nil
 	}
-	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes ports=%d for %v\n", len(ports), ip.Address.String())
 
 	since, err := support.TTLStartTime(e.Session.Config(), string(oam.IPAddress), string(oam.Service), pp.name)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes EXIT ttl-error (%v) for %v\n", err, ip.Address.String())
 		return err
 	}
-	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes since=%v for %v\n", since, ip.Address.String())
 
 	if support.AssetMonitoredWithinTTL(e.Session, e.Entity, pp.source, since) {
-		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes EXIT already-monitored for %v\n", ip.Address.String())
 		return nil
 	}
-
-	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes REACHED probe loop for %v\n", ip.Address.String())
 
 	addr := ip.Address.String()
 	dial := selectDialer(e)
@@ -193,7 +169,6 @@ func (pp *protocolProbes) check(e *et.Event) error {
 		pp.probeOnePort(e, dial, addr, port)
 	}
 
-	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes COMPLETED for %v\n", ip.Address.String())
 	support.MarkAssetMonitored(e.Session, e.Entity, pp.source)
 	return nil
 }
@@ -206,41 +181,16 @@ func (pp *protocolProbes) check(e *et.Event) error {
 func (pp *protocolProbes) probeOnePort(e *et.Event, dial amassnet.DialContext, addr string, port int) {
 	target := net.JoinHostPort(addr, strconv.Itoa(port))
 
-	// TEMPORARY DIAGNOSTIC - remove once the missing-port investigation
-	// is resolved. Confirms whether a specific port is even being
-	// attempted at all, and if so, exactly what PeekBanner returned -
-	// needed because cert-harvest-failed (the existing diagnostic)
-	// only ever fires on the GuessSilent path, telling us nothing about
-	// a port that goes through GuessSSH/GuessAmbiguousBanner, or one
-	// that fails during the peek itself before classification ever
-	// happens.
-	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes probeOnePort target=%v\n", target)
-
 	result := PeekBanner(e.Session.Ctx(), dial, target, PeekTimeout)
 	if result.Err != nil {
-		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes probeOnePort target=%v PEEK_ERROR=%v\n", target, result.Err)
 		return
 	}
-	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes probeOnePort target=%v classification=%v dataLen=%d\n",
-		target, ClassifyPeek(result.Data), len(result.Data))
 
 	switch ClassifyPeek(result.Data) {
 	case GuessSSH:
 		pp.handleSSH(e, addr, port, string(result.Data))
 	case GuessAmbiguousBanner:
-		// TEMPORARY DIAGNOSTIC - remove once the binary-banner storage
-		// investigation is resolved. Isolates whether the gap is
-		// between this switch case being entered and
-		// handleAmbiguousBanner actually being called, or something
-		// even earlier - storeServiceAndIdentify's own "ENTERED" line
-		// (the very first statement in that function) never printed
-		// for MySQL's binary handshake across three separate,
-		// consistent runs, despite this exact code path working
-		// correctly for FTP and SMTP banners.
-		banner := string(result.Data)
-		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes switch GuessAmbiguousBanner target=%v bannerLen=%d\n", target, len(banner))
-		pp.handleAmbiguousBanner(e, addr, port, banner)
-		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes switch GuessAmbiguousBanner target=%v handleAmbiguousBanner RETURNED\n", target)
+		pp.handleAmbiguousBanner(e, addr, port, string(result.Data))
 	case GuessSilent:
 		// Consistent with existing implicit-TLS ports: a service that
 		// sends nothing before the client speaks is exactly the
@@ -256,13 +206,6 @@ func (pp *protocolProbes) probeOnePort(e *et.Event, dial amassnet.DialContext, a
 		// HarvestCertificate's own doc comment for the full reasoning
 		// behind this fix.
 		if err := HarvestCertificate(e, dial, e.Entity, addr, port, PeekTimeout); err != nil {
-			// TEMPORARY DIAGNOSTIC - remove once the missing-certificate
-			// investigation is resolved. Writes directly to stderr,
-			// bypassing the same log-visibility gap confirmed for
-			// "Plugin started" and the association rationale earlier -
-			// pp.log.Warn on the line below has never once shown up in
-			// either docker logs engine or docker logs syslog.
-			fmt.Fprintf(os.Stderr, "DEBUG protocol_probes cert-harvest-failed target=%v error=%v\n", target, err)
 			pp.log.Warn("certificate harvest failed", "target", target, "error", err.Error())
 		}
 	}
@@ -294,27 +237,6 @@ func (pp *protocolProbes) handleAmbiguousBanner(e *et.Event, addr string, port i
 // if Recog recognizes the banner against any of the given databases,
 // creates the corresponding Product/ProductRelease entities.
 func (pp *protocolProbes) storeServiceAndIdentify(e *et.Event, addr string, port int, svcType, banner string, dbNames []string) {
-	// TEMPORARY DIAGNOSTIC - remove once the binary-banner storage
-	// investigation is resolved. The recover() here is the direct way
-	// to answer the open question from the prior diagnostic: since
-	// neither a database row nor the existing err!=nil log line ever
-	// appeared for MySQL's binary handshake, a panic somewhere in this
-	// function (or something it calls) - silently caught by an outer
-	// recovery in the pipeline/dispatcher framework, a common,
-	// sensible pattern to keep one bad handler from taking down the
-	// whole engine - is the remaining, most likely explanation. This
-	// recover() sits closer to the source, so it catches the panic
-	// first and can print exactly what it is, rather than only
-	// inferring one exists from silence.
-	defer func() {
-		if r := recover(); r != nil {
-			fmt.Fprintf(os.Stderr, "DEBUG protocol_probes storeServiceAndIdentify PANICKED addr=%v port=%v recovered=%v bannerLen=%d bannerQuoted=%q\n",
-				addr, port, r, len(banner), banner)
-		}
-	}()
-	fmt.Fprintf(os.Stderr, "DEBUG protocol_probes storeServiceAndIdentify ENTERED addr=%v port=%v svcType=%v bannerLen=%d\n",
-		addr, port, svcType, len(banner))
-
 	// Postgres text columns cannot store an embedded null byte at all -
 	// not a soft validation concern, a hard, unconditional rejection
 	// independent of UTF-8 validity (a null byte is itself valid
@@ -332,16 +254,6 @@ func (pp *protocolProbes) storeServiceAndIdentify(e *et.Event, addr string, port
 
 	svcEntity, err := FindOrCreateService(e, e.Entity, addr, port, svcType, storableBanner)
 	if err != nil {
-		// TEMPORARY DIAGNOSTIC - remove once the binary-banner storage
-		// investigation is resolved. Writes directly to stderr for the
-		// same reason as every other diagnostic in this file - pp.log
-		// output has never once shown up in docker logs for either
-		// container, confirmed repeatedly. %q on the raw banner
-		// specifically to surface whether a null byte or other
-		// non-UTF8 content (expected for binary protocols like MySQL's
-		// handshake) is what's actually causing CreateAsset to fail.
-		fmt.Fprintf(os.Stderr, "DEBUG protocol_probes storeServiceAndIdentify FAILED addr=%v port=%v error=%v bannerLen=%d bannerQuoted=%q\n",
-			addr, port, err, len(banner), banner)
 		pp.log.Warn("failed to store the Service asset", "addr", addr, "port", port, "error", err.Error())
 		return
 	}
