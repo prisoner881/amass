@@ -17,6 +17,7 @@ import (
 	et "github.com/owasp-amass/amass/v5/engine/types"
 	amassnet "github.com/owasp-amass/amass/v5/internal/net"
 	dbt "github.com/owasp-amass/asset-db/types"
+	oam "github.com/owasp-amass/open-asset-model"
 	oamcert "github.com/owasp-amass/open-asset-model/certificate"
 	oamgen "github.com/owasp-amass/open-asset-model/general"
 	oamplat "github.com/owasp-amass/open-asset-model/platform"
@@ -170,18 +171,53 @@ func dialAndGetCertChain(ctx context.Context, dial amassnet.DialContext, addr, s
 // hardcoded to the cert-harvest case, so plugin.go's banner-first path
 // (service.go) can reuse this exact same construction instead of a
 // second, near-duplicate implementation.
+// FindOrCreateService looks up the Service at this exact host:port
+// before deciding whether to set its Type/Output. ServiceWithIdentifier's
+// own unique_id scheme (in support/normalization.go) is deliberately
+// keyed on host:port:protocol alone, not service_type - a hash of
+// "addr:tcp:port", the same host:port produces the identical,
+// deterministic ID regardless of which plugin discovers it, since a
+// given port can only ever be one real service in reality, whichever
+// plugin gets there first.
+//
+// Without the existence check below, CreateAsset's upsert behavior
+// meant whichever plugin ran second - http_probes or protocol_probes,
+// in whatever order the pipeline happened to schedule them - silently
+// overwrote the other's Type field on the exact same row. Confirmed
+// directly against real enumeration data: protocol_probes' own "tls"
+// classification was overwriting http_probes' genuine "web-service"
+// classification on ports 80 and 443, while - for reasons not fully
+// investigated, likely a field-level merge quirk in the underlying
+// upsert - the real HTML response text survived intact underneath the
+// wrong type label.
+//
+// "Find or create" now means exactly that: if a Service already
+// exists here, it's returned and used as-is, Type/Output untouched;
+// only a genuinely new Service gets these values set at all. The
+// PortRelation edge below is still always attempted either way, since
+// it's a cheap, idempotent upsert on the database side, and skipping
+// it when a Service already existed risked losing a legitimate edge
+// if this call's parent entity ever turned out to differ from
+// whichever plugin created the Service first.
 func FindOrCreateService(e *et.Event, parent *dbt.Entity, addr string, port int, svcType, output string) (*dbt.Entity, error) {
 	serv := support.ServiceWithIdentifier(addr, "tcp", port)
-	serv.Type = svcType
-	serv.Output = output
-	serv.OutputLen = len(output)
 
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 15*time.Second)
 	defer cancel()
 
-	svcEntity, err := e.Session.DB().CreateAsset(ctx, serv)
-	if err != nil || svcEntity == nil {
-		return nil, errors.New("protocol_probes: failed to create the Service asset")
+	svcEntity, err := findExistingServiceByUniqueID(ctx, e, serv.ID)
+	if err != nil {
+		return nil, err
+	}
+	if svcEntity == nil {
+		serv.Type = svcType
+		serv.Output = output
+		serv.OutputLen = len(output)
+
+		svcEntity, err = e.Session.DB().CreateAsset(ctx, serv)
+		if err != nil || svcEntity == nil {
+			return nil, errors.New("protocol_probes: failed to create the Service asset")
+		}
 	}
 
 	if _, err := e.Session.DB().CreateEdge(ctx, &dbt.Edge{
@@ -196,6 +232,22 @@ func FindOrCreateService(e *et.Event, parent *dbt.Entity, addr string, port int,
 	}
 
 	return svcEntity, nil
+}
+
+// findExistingServiceByUniqueID looks up a Service entity by its exact,
+// deterministic unique_id, without creating or modifying anything.
+// Returns (nil, nil) - not an error - when none exists yet, the
+// expected, normal case for a genuinely new host:port.
+func findExistingServiceByUniqueID(ctx context.Context, e *et.Event, uniqueID string) (*dbt.Entity, error) {
+	found, err := e.Session.DB().FindEntitiesByContent(ctx, oam.Service, time.Time{}, 1,
+		dbt.ContentFilters{"unique_id": uniqueID})
+	if err != nil {
+		return nil, err
+	}
+	if len(found) == 0 {
+		return nil, nil
+	}
+	return found[0], nil
 }
 
 // storeCertChain walks the peer certificate chain leaf-to-root, storing
