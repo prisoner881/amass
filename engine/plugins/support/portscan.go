@@ -9,6 +9,7 @@ import (
 	"net"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	et "github.com/owasp-amass/amass/v5/engine/types"
@@ -158,6 +159,30 @@ func EnsureOpenPortsScanned(e *et.Event, ent *dbt.Entity, dial amassnet.DialCont
 // to answer "is anything listening here," leaving what's actually
 // running to protocol_probes and http_probes further down the
 // pipeline.
+// prefilterScanned and prefilterOpen are plain package-level atomic
+// counters, not tied to any Session - a deliberate, simpler choice
+// than session-scoped tracking, since this fork's own deployment
+// model runs exactly one session per engine process, with containers
+// brought down between separate enumerations rather than reused. That
+// makes a global counter correct as-is for this fork's actual usage;
+// it would not be for a deployment running multiple concurrent
+// sessions in one long-lived process, or reusing a process across
+// separate enumerations without a reset in between.
+var (
+	prefilterScanned atomic.Int64
+	prefilterOpen    atomic.Int64
+)
+
+// PrefilterStats returns the cumulative number of ports scanned and
+// found open across every EnsureOpenPortsScanned call so far -
+// intended for dashboard/monitoring display during active
+// development (see the port_prefilter effectiveness discussion this
+// originated from), not for any decision-making in a production
+// deployment, where nothing is expected to read these values at all.
+func PrefilterStats() (scanned, open int64) {
+	return prefilterScanned.Load(), prefilterOpen.Load()
+}
+
 func scanPorts(ctx context.Context, dial amassnet.DialContext, addr string, ports []int) []int {
 	if dial == nil {
 		dial = amassnet.NewDialContext(PortPrefilterScanTimeout)
@@ -177,11 +202,14 @@ func scanPorts(ctx context.Context, dial amassnet.DialContext, addr string, port
 			defer func() { <-sem }()
 
 			target := net.JoinHostPort(addr, strconv.Itoa(port))
+			prefilterScanned.Add(1)
+
 			conn, err := dial(ctx, "tcp", target)
 			if err != nil {
 				return
 			}
 			_ = conn.Close()
+			prefilterOpen.Add(1)
 
 			mu.Lock()
 			open = append(open, port)
