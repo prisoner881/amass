@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/owasp-amass/amass/v5/config"
+	"github.com/owasp-amass/amass/v5/engine/plugins/support"
 	et "github.com/owasp-amass/amass/v5/engine/types"
 	oam "github.com/owasp-amass/open-asset-model"
 )
@@ -477,16 +478,50 @@ func (v *V1Handlers) AddAssetsBulkHandler(w http.ResponseWriter, r *http.Request
 // side to add a session tag.
 
 // BacklogBucket represents one asset type's current backlog state.
+// Queue is the pipeline's own internal queue depth for this asset
+// type (distinct from Waiting, the backlog's own pre-claim count) -
+// added specifically to distinguish two different bottleneck shapes:
+// Waiting high with Queue near its MaxQueued ceiling (see
+// engine/dispatcher/dispatcher.go's own limitsByAssetType) means
+// handlers can't drain work fast enough; Waiting high with Queue near
+// zero means the dispatcher's own claim rate (PerSessBurst) is itself
+// the constraint, since the pipeline is starved rather than backed
+// up. Neither of the existing three columns alone could distinguish
+// these two, meaningfully different situations from each other.
 type BacklogBucket struct {
 	AssetType string `json:"asset_type"`
-	Queued    int64  `json:"queued"`
+	Waiting   int64  `json:"waiting"`
 	Leased    int64  `json:"leased"`
+	Queue     int    `json:"queue"`
 	Processed int64  `json:"processed"`
 }
 
 // BacklogResponse is the payload for GetBacklogHandler.
+//
+// ActiveConnections/MaxConnections reflect Session.NetSem()'s current
+// utilization - a single, engine-wide value (not per-bucket, unlike
+// everything above) since it's a resource shared across every plugin
+// and asset type simultaneously, not scoped to any one of them; a
+// bucket could show a perfectly healthy Queue/Waiting picture while
+// this shared pool is still the actual, invisible-to-any-single-
+// bucket bottleneck.
+//
+// PrefilterScanned/PrefilterOpen are the port_prefilter feature's own
+// cumulative counters (see support.PrefilterStats) - intended for
+// development-time visibility into how effective the pre-filter
+// actually is at a given target, not for any production
+// decision-making. These are plain, session-independent globals; see
+// support.PrefilterStats's own doc comment for why that's a
+// deliberate, correct choice for this fork's specific deployment
+// model (one session per engine process, containers brought down
+// between separate enumerations) rather than a general-purpose
+// design.
 type BacklogResponse struct {
-	Buckets []BacklogBucket `json:"buckets"`
+	Buckets           []BacklogBucket `json:"buckets"`
+	ActiveConnections int             `json:"active_connections"`
+	MaxConnections    int             `json:"max_connections"`
+	PrefilterScanned  int64           `json:"prefilter_scanned"`
+	PrefilterOpen     int64           `json:"prefilter_open"`
 }
 
 // allTrackedAssetTypes lists every asset type the backlog is queried for.
@@ -505,7 +540,7 @@ var allTrackedAssetTypes = []oam.AssetType{
 // GetBacklogHandler godoc
 //
 // @Summary      Get per-asset-type backlog counts for a session
-// @Description  Returns, for each asset type with any activity, the number of entities queued, currently leased (in flight), and already processed. Backed entirely by data already tracked in Session.Backlog() - no new tracking added.
+// @Description  Returns, for each asset type with any activity, the number of entities waiting, currently leased (in flight), sitting in the pipeline's own internal queue, and already processed - plus session-wide connection semaphore utilization and cumulative port_prefilter statistics. Development/testing tooling: PrefilterScanned/PrefilterOpen use plain, session-independent counters (see support.PrefilterStats), correct for this fork's one-session-per-process deployment model but not intended for use in a multi-session or long-lived-process deployment.
 // @Tags         sessions
 // @Produce      json
 // @Param        session_token  path  string  true  "Session token (UUID)"
@@ -529,24 +564,41 @@ func (v *V1Handlers) GetBacklogHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	pipelines := sess.Pipelines()
+
 	var buckets []BacklogBucket
 	for _, atype := range allTrackedAssetTypes {
-		queued, leased, done, err := sess.Backlog().Counts(atype)
+		waiting, leased, done, err := sess.Backlog().Counts(atype)
 		if err != nil {
 			continue
 		}
-		if queued == 0 && leased == 0 && done == 0 {
+
+		var queueLen int
+		if p, ok := pipelines[atype]; ok && p != nil && p.Queue != nil {
+			queueLen = p.Queue.Len()
+		}
+
+		if waiting == 0 && leased == 0 && done == 0 && queueLen == 0 {
 			continue
 		}
 		buckets = append(buckets, BacklogBucket{
 			AssetType: string(atype),
-			Queued:    queued,
+			Waiting:   waiting,
 			Leased:    leased,
+			Queue:     queueLen,
 			Processed: done,
 		})
 	}
 
-	writeJSON(w, http.StatusOK, BacklogResponse{Buckets: buckets})
+	scanned, open := support.PrefilterStats()
+
+	writeJSON(w, http.StatusOK, BacklogResponse{
+		Buckets:           buckets,
+		ActiveConnections: sess.NetSem().InUse(),
+		MaxConnections:    sess.NetSem().Cap(),
+		PrefilterScanned:  scanned,
+		PrefilterOpen:     open,
+	})
 }
 
 // HandlerStat represents one handler's average execution time and call
