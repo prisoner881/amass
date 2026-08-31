@@ -100,9 +100,15 @@ func (r *ipaddrEndpoint) lookup(e *et.Event, ip *dbt.Entity, since time.Time) []
 func (r *ipaddrEndpoint) query(e *et.Event, ipaddr *dbt.Entity) []*support.Finding {
 	var findings []*support.Finding
 
+	// Ports now come from port_prefilter's own, prior findings on this
+	// specific IP (support.OpenPortsForIP), rather than the full,
+	// static Scope.Ports list directly - see port_prefilter's own doc
+	// comment for the full design reasoning behind this change.
+	ports := support.OpenPortsForIP(e.Session.Ctx(), e.Session, ipaddr)
+
 	var count int
-	fch := make(chan []*support.Finding, len(e.Session.Config().Scope.Ports))
-	for _, port := range e.Session.Config().Scope.Ports {
+	fch := make(chan []*support.Finding, len(ports))
+	for _, port := range ports {
 		count++
 		go r.probeOnePort(e, ipaddr, port, fch)
 	}
