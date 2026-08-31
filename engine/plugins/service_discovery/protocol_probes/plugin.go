@@ -174,7 +174,29 @@ func (pp *protocolProbes) check(e *et.Event) error {
 
 	addr := ip.Address.String()
 	dial := selectDialer(e)
+
+	// Most-likely-to-be-open ports first (nmap's own real, published
+	// frequency data) - harmless for a normal asset, since every port
+	// still eventually gets tried either way; matters specifically for
+	// a flagged one below, where the deadline may cut processing off
+	// before the full list is reached.
+	support.SortByFrequencyDesc(ports)
+
+	// Only ever non-zero for an IP whose open-port count crosses
+	// support.LikelyDecoyThreshold - almost certainly WAF/edge
+	// infrastructure advertising fabricated open ports (see
+	// support.DecoyDeadline's own doc comment), not a genuine host
+	// really running this many services at once. A normal, non-flagged
+	// asset keeps today's existing, deliberately unbounded behavior -
+	// confirmed directly against the real source that no per-asset
+	// time limit exists anywhere in this codebase today, at either the
+	// plugin or engine level.
+	deadline := support.DecoyDeadline(len(ports))
+
 	for _, port := range ports {
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			break
+		}
 		pp.probeOnePort(e, dial, addr, port)
 	}
 
