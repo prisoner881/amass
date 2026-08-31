@@ -120,6 +120,12 @@ func (fe *fqdnEndpoint) query(e *et.Event, host *dbt.Entity) []*support.Finding 
 	// reasoning this originated from.
 	ports := support.OpenPortsForFQDN(e, host, nil)
 
+	// Most-likely-to-be-open ports first (nmap's own real, published
+	// frequency data) - see protocol_probes' identical use of this,
+	// and ipaddr_endpoint.go's own version of this same comment, for
+	// the fuller reasoning.
+	support.SortByFrequencyDesc(ports)
+
 	var count int
 	fch := make(chan []*support.Finding, len(ports))
 	for _, port := range ports {
@@ -127,9 +133,21 @@ func (fe *fqdnEndpoint) query(e *et.Event, host *dbt.Entity) []*support.Finding 
 		go fe.probeOnePort(e, host, port, fch)
 	}
 
+	// Only ever non-nil for an asset whose open-port count crosses
+	// support.LikelyDecoyThreshold - see ipaddr_endpoint.go's own
+	// identical use of this for the fuller reasoning. A nil channel
+	// here preserves today's existing, deliberately unbounded behavior
+	// for a normal, non-flagged asset.
+	timeout := support.DecoyTimeoutChannel(len(ports))
+
 	for range count {
-		if results := <-fch; len(results) > 0 {
-			findings = append(findings, results...)
+		select {
+		case results := <-fch:
+			if len(results) > 0 {
+				findings = append(findings, results...)
+			}
+		case <-timeout:
+			return findings
 		}
 	}
 

@@ -106,6 +106,17 @@ func (r *ipaddrEndpoint) query(e *et.Event, ipaddr *dbt.Entity) []*support.Findi
 	// comment for the full design reasoning behind this change.
 	ports := support.OpenPortsForIP(e.Session.Ctx(), e.Session, ipaddr)
 
+	// Most-likely-to-be-open ports first (nmap's own real, published
+	// frequency data) - see protocol_probes' own identical use of this
+	// for the fuller reasoning. Every goroutine below launches
+	// regardless of this order (all ports start at once, unlike
+	// protocol_probes' sequential loop), but findings still arrive on
+	// fch roughly in the order each port's own connection actually
+	// resolves - sorting first means a flagged asset's timeout below
+	// is more likely to have already captured results from its
+	// highest-value ports by the time it fires.
+	support.SortByFrequencyDesc(ports)
+
 	var count int
 	fch := make(chan []*support.Finding, len(ports))
 	for _, port := range ports {
@@ -113,9 +124,22 @@ func (r *ipaddrEndpoint) query(e *et.Event, ipaddr *dbt.Entity) []*support.Findi
 		go r.probeOnePort(e, ipaddr, port, fch)
 	}
 
+	// Only ever non-nil for an asset whose open-port count crosses
+	// support.LikelyDecoyThreshold - see support.DecoyTimeoutChannel's
+	// own doc comment. A nil channel here means this select always
+	// falls through to the fch case alone, preserving today's
+	// existing, deliberately unbounded behavior for a normal,
+	// non-flagged asset.
+	timeout := support.DecoyTimeoutChannel(len(ports))
+
 	for range count {
-		if results := <-fch; len(results) > 0 {
-			findings = append(findings, results...)
+		select {
+		case results := <-fch:
+			if len(results) > 0 {
+				findings = append(findings, results...)
+			}
+		case <-timeout:
+			return findings
 		}
 	}
 
