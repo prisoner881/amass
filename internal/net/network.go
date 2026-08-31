@@ -83,6 +83,25 @@ func (r Semaphore) Release() {
 	}
 }
 
+// InUse returns how many of this semaphore's slots are currently
+// checked out. Semaphore is a plain, pre-filled buffered channel
+// (NewSemaphore fills it with cap tokens up front, Acquire receives
+// one, Release sends one back) - len(r) is therefore exactly how many
+// tokens are currently sitting free in the buffer, so cap(r) - len(r)
+// is the number currently in use. Both len and cap are safe for
+// concurrent use on a channel without any additional synchronization.
+func (r Semaphore) InUse() int {
+	return cap(r) - len(r)
+}
+
+// Cap returns this semaphore's total capacity - a thin, named wrapper
+// around the builtin cap(), kept alongside InUse so callers displaying
+// "in use / total"-style output don't need to know Semaphore is
+// implemented as a channel at all.
+func (r Semaphore) Cap() int {
+	return cap(r)
+}
+
 type DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
 
 // NewDialContext performs the dial using global variables (e.g. LocalAddr).
