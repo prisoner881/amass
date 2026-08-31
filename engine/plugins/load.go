@@ -17,6 +17,7 @@ import (
 	"github.com/owasp-amass/amass/v5/engine/plugins/scrape"
 	dnssd "github.com/owasp-amass/amass/v5/engine/plugins/service_discovery/dns"
 	hp "github.com/owasp-amass/amass/v5/engine/plugins/service_discovery/http_probes"
+	"github.com/owasp-amass/amass/v5/engine/plugins/service_discovery/port_prefilter"
 	pp "github.com/owasp-amass/amass/v5/engine/plugins/service_discovery/protocol_probes"
 	"github.com/owasp-amass/amass/v5/engine/plugins/whois"
 	"github.com/owasp-amass/amass/v5/engine/plugins/whois/bgptools"
@@ -57,6 +58,7 @@ var pluginNewFuncs = []func() et.Plugin{
 	gleif.NewGLEIF,
 	horizontals.NewHorizontals,
 	hp.NewHTTPProbing,
+	port_prefilter.NewPortPrefilter,
 	pp.NewProtocolProbes,
 	rdap.NewRDAP,
 	scrape.NewBing,
