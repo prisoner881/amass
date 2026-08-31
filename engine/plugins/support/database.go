@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"time"
 
@@ -301,4 +302,113 @@ func PreferredSNIHostname(ctx context.Context, session et.Session, ent *dbt.Enti
 		}
 	}
 	return fqdns[0].Name
+}
+
+// OpenPortConfidence is the confidence value attached to a
+// "port_prefilter"-sourced open_port property. Deliberately a plain
+// property write, not a Source/Finding-based ProcessAssetsWithSource
+// call - the pre-filter's job is a single, simple fact per port
+// ("this connected"), not a discovered relationship between two
+// separate entities, so the lighter-weight, direct
+// CreateEntityProperty path used by Tech-Stack's own icon property
+// (see storeProduct in enrich/techstack.go) is the right precedent to
+// follow here, not the Finding-based pattern used elsewhere in this
+// package.
+const openPortPropertyName = "open_port"
+
+// StoreOpenPort records that the given port answered a plain TCP
+// connect attempt against ent (expected to be an IPAddress). One
+// property per port, rather than a single combined/encoded value -
+// keeps this consistent with how the rest of the schema already
+// stores repeated, multi-valued facts about an entity (see the
+// "icon" property precedent above), and keeps the read side
+// (OpenPortsForIP) a simple, single FindEntityTags call.
+func StoreOpenPort(ctx context.Context, session et.Session, ent *dbt.Entity, port int) error {
+	_, err := session.DB().CreateEntityProperty(ctx, ent, &oamgen.SimpleProperty{
+		PropertyName:  openPortPropertyName,
+		PropertyValue: strconv.Itoa(port),
+	})
+	return err
+}
+
+// OpenPortsForIP returns every port previously confirmed open (via
+// StoreOpenPort) on the given entity, expected to be an IPAddress.
+// Returns an empty slice, not an error, if none exist yet or the
+// lookup fails - the same "nothing found is not exceptional" contract
+// as ResolvingFQDNs and PreferredSNIHostname above, since a genuinely
+// new IP that the port_prefilter hasn't reached yet is an expected,
+// ordinary state, not a fault condition.
+func OpenPortsForIP(ctx context.Context, session et.Session, ent *dbt.Entity) []int {
+	tags, err := session.DB().FindEntityTags(ctx, ent, time.Time{}, openPortPropertyName)
+	if err != nil {
+		return nil
+	}
+
+	var ports []int
+	for _, tag := range tags {
+		prop, ok := tag.Property.(*oamgen.SimpleProperty)
+		if !ok {
+			continue
+		}
+		if port, err := strconv.Atoi(prop.PropertyValue); err == nil {
+			ports = append(ports, port)
+		}
+	}
+	return ports
+}
+
+// ResolvedIPsForFQDN walks outgoing dns_record edges from the given
+// entity (expected to be an FQDN) forward to whatever IPAddress
+// entities it actually resolves to - the mirror image of
+// ResolvingFQDNs above, which walks the same edge type in the
+// opposite direction (from an IP backward to the FQDNs resolving to
+// it). Follows CNAME-style intermediate FQDN hops up to maxHops deep
+// (real, multi-hop CNAME chains are common - confirmed directly
+// against real targets earlier in this project) rather than either a
+// single hop, which would miss them, or unbounded recursion, which
+// risks looping forever against a circular or misconfigured DNS
+// chain. Returns whatever distinct IPAddress entities were reached,
+// deduplicated by their database ID; an empty slice if none are
+// reachable within the hop limit.
+func ResolvedIPsForFQDN(ctx context.Context, session et.Session, ent *dbt.Entity) []*dbt.Entity {
+	const maxHops = 5
+
+	var ips []*dbt.Entity
+	seen := make(map[string]struct{})
+	frontier := []*dbt.Entity{ent}
+
+	for hop := 0; hop < maxHops && len(frontier) > 0; hop++ {
+		var next []*dbt.Entity
+
+		for _, cur := range frontier {
+			edges, err := session.DB().OutgoingEdges(ctx, cur, time.Time{}, "dns_record")
+			if err != nil {
+				continue
+			}
+			for _, edge := range edges {
+				if edge.ToEntity == nil {
+					continue
+				}
+				toEnt, err := session.DB().FindEntityById(ctx, edge.ToEntity.ID)
+				if err != nil || toEnt == nil {
+					continue
+				}
+				if _, dup := seen[toEnt.ID]; dup {
+					continue
+				}
+				seen[toEnt.ID] = struct{}{}
+
+				switch toEnt.Asset.(type) {
+				case *oamnet.IPAddress:
+					ips = append(ips, toEnt)
+				case *oamdns.FQDN:
+					// A CNAME-style intermediate hop - keep walking
+					// forward from here on the next iteration.
+					next = append(next, toEnt)
+				}
+			}
+		}
+		frontier = next
+	}
+	return ips
 }
