@@ -375,6 +375,28 @@ func (ss *sessSemaphore) Release() {
 	sem.Release()
 }
 
+// InUse and Cap follow the exact same lock-copy-unlock pattern as
+// Acquire/Release above, for the same reason - len()/cap() on the
+// underlying channel are themselves safe for concurrent use without
+// any lock, but ss.sem itself can be concurrently reassigned by
+// buildNewSessionSemaphore()'s own resizing, so the field read still
+// needs the same protection Acquire/Release already give it.
+func (ss *sessSemaphore) InUse() int {
+	ss.Lock()
+	sem := ss.sem
+	ss.Unlock()
+
+	return sem.InUse()
+}
+
+func (ss *sessSemaphore) Cap() int {
+	ss.Lock()
+	sem := ss.sem
+	ss.Unlock()
+
+	return sem.Cap()
+}
+
 func (s *Session) updateSessionSemaphore() {
 	tick := time.NewTicker(10 * time.Second)
 	defer tick.Stop()
