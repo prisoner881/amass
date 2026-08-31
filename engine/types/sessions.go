@@ -30,6 +30,8 @@ type SessionPipelines map[oam.AssetType]*AssetPipeline
 type SessionSemaphone interface {
 	Acquire()
 	Release()
+	InUse() int
+	Cap() int
 }
 
 type SessionHTTPClients struct {
