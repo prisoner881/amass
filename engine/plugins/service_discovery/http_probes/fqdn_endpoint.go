@@ -97,9 +97,32 @@ func (fe *fqdnEndpoint) lookup(e *et.Event, host *dbt.Entity, since time.Time) [
 func (fe *fqdnEndpoint) query(e *et.Event, host *dbt.Entity) []*support.Finding {
 	var findings []*support.Finding
 
+	// Ports now come from support.OpenPortsForFQDN, which resolves
+	// this FQDN to its own IPs (following CNAME-style intermediate
+	// hops) and, for each one, either reads back an already-cached
+	// port_prefilter result or actively triggers that scan itself if
+	// one hasn't happened yet - not the full, static Scope.Ports list
+	// directly. This only changes which ports get tried; the actual
+	// connection target below (proto + "://" + fqdn.Name + ":" + port,
+	// in probeOnePort) is untouched, so this handler's whole reason
+	// for existing - connecting by hostname for correct, unambiguous
+	// SNI on virtually-hosted targets, rather than by a bare, possibly
+	// -shared IP - is fully preserved. A hostname resolving to several,
+	// differently-configured IPs means this can over-include ports
+	// only genuinely open on one of them; a deliberate tradeoff toward
+	// completeness over precision, not an oversight. dial is nil here
+	// deliberately - http_probes has no dialer-selection helper of its
+	// own yet, so this falls back to support.scanPorts' own plain
+	// default, the same as everywhere else in this codebase when no
+	// dialer is explicitly injected; a future active-proxy-egress
+	// integration point, not something needed today. See
+	// support.OpenPortsForFQDN's own doc comment for the full
+	// reasoning this originated from.
+	ports := support.OpenPortsForFQDN(e, host, nil)
+
 	var count int
-	fch := make(chan []*support.Finding, len(e.Session.Config().Scope.Ports))
-	for _, port := range e.Session.Config().Scope.Ports {
+	fch := make(chan []*support.Finding, len(ports))
+	for _, port := range ports {
 		count++
 		go fe.probeOnePort(e, host, port, fch)
 	}
