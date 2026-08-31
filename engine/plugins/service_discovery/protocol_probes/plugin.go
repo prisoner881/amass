@@ -149,7 +149,16 @@ func (pp *protocolProbes) check(e *et.Event) error {
 		return nil
 	}
 
-	ports := e.Session.Config().Scope.Ports
+	// Ports to probe now come from port_prefilter's own, prior
+	// findings on this specific IP (support.OpenPortsForIP), rather
+	// than the full, static Scope.Ports list directly. That list's own
+	// role has changed accordingly: it's now the (potentially much
+	// broader, e.g. nmap's top-1000) range port_prefilter itself
+	// sweeps to discover liveness, not the exact set every plugin
+	// probes at the expensive, per-protocol identification stage. See
+	// the port_prefilter package's own doc comment for the full design
+	// reasoning.
+	ports := support.OpenPortsForIP(e.Session.Ctx(), e.Session, e.Entity)
 	if len(ports) == 0 {
 		return nil
 	}
