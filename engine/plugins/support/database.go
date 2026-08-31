@@ -412,3 +412,63 @@ func ResolvedIPsForFQDN(ctx context.Context, session et.Session, ent *dbt.Entity
 	}
 	return ips
 }
+
+// openPortCountPropertyName is a deliberately separate property from
+// openPortPropertyName itself (one entry per open port found) - this
+// one is a single, explicit count of how many ports were found open
+// on a given IP in total, stored once per scan. Storing the raw
+// count directly, rather than only a derived true/false "flagged"
+// property, keeps the signal itself independent of whatever threshold
+// currently defines "likely decoy" (see LikelyDecoyThreshold) - the
+// same real count remains queryable and directly useful even if that
+// threshold changes later, and it lets anyone reviewing results later
+// see how extreme a given case actually was, not just whether it
+// crossed some line.
+const openPortCountPropertyName = "open_port_count"
+
+// StoreOpenPortCount records the total number of ports found open on
+// ent (expected to be an IPAddress) during a single port_prefilter
+// scan pass. Called once per scan, alongside (not instead of) the
+// individual StoreOpenPort calls for each open port found.
+func StoreOpenPortCount(ctx context.Context, session et.Session, ent *dbt.Entity, count int) error {
+	_, err := session.DB().CreateEntityProperty(ctx, ent, &oamgen.SimpleProperty{
+		PropertyName:  openPortCountPropertyName,
+		PropertyValue: strconv.Itoa(count),
+	})
+	return err
+}
+
+// OpenPortCountForIP returns the most recently stored open-port count
+// for ent (expected to be an IPAddress), or 0 if none has ever been
+// stored - the same "nothing found is not exceptional" contract as
+// OpenPortsForIP and the other lookup helpers in this file, since an
+// IP port_prefilter hasn't reached yet is an ordinary, expected state,
+// not a fault condition.
+func OpenPortCountForIP(ctx context.Context, session et.Session, ent *dbt.Entity) int {
+	tags, err := session.DB().FindEntityTags(ctx, ent, time.Time{}, openPortCountPropertyName)
+	if err != nil || len(tags) == 0 {
+		return 0
+	}
+
+	// Multiple stored counts are possible if this IP has been scanned
+	// more than once across separate runs without a wipe (the same TTL
+	// re-scan scenario this whole feature already accounts for
+	// elsewhere) - the most recent one (by LastSeen) is the correct,
+	// current answer, not an arbitrary or first-found one.
+	latest := tags[0]
+	for _, tag := range tags[1:] {
+		if tag.LastSeen.After(latest.LastSeen) {
+			latest = tag
+		}
+	}
+
+	prop, ok := latest.Property.(*oamgen.SimpleProperty)
+	if !ok {
+		return 0
+	}
+	count, err := strconv.Atoi(prop.PropertyValue)
+	if err != nil {
+		return 0
+	}
+	return count
+}

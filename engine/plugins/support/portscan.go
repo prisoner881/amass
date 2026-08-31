@@ -134,6 +134,11 @@ func EnsureOpenPortsScanned(e *et.Event, ent *dbt.Entity, dial amassnet.DialCont
 			// hard failure over a partial, non-critical write issue.
 			_ = StoreOpenPort(ctx, e.Session, ent, port)
 		}
+		// Stored once per scan, alongside the individual open_port
+		// properties above - the raw signal LikelyDecoyThreshold/
+		// IsLikelyDecoy read back later, independent of whichever
+		// threshold happens to define "likely decoy" at query time.
+		_ = StoreOpenPortCount(ctx, e.Session, ent, len(open))
 
 		// Marked monitored unconditionally, even when open is empty -
 		// this is what makes "genuinely scanned, nothing open" and
