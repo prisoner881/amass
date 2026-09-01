@@ -99,26 +99,28 @@ func (fe *fqdnEndpoint) query(e *et.Event, host *dbt.Entity) []*support.Finding 
 
 	// Ports now come from support.OpenPortsForFQDN, which resolves
 	// this FQDN to its own IPs (following CNAME-style intermediate
-	// hops) and, for each one, either reads back an already-cached
-	// port_prefilter result or actively triggers that scan itself if
-	// one hasn't happened yet - not the full, static Scope.Ports list
-	// directly. This only changes which ports get tried; the actual
-	// connection target below (proto + "://" + fqdn.Name + ":" + port,
-	// in probeOnePort) is untouched, so this handler's whole reason
-	// for existing - connecting by hostname for correct, unambiguous
-	// SNI on virtually-hosted targets, rather than by a bare, possibly
-	// -shared IP - is fully preserved. A hostname resolving to several,
-	// differently-configured IPs means this can over-include ports
-	// only genuinely open on one of them; a deliberate tradeoff toward
-	// completeness over precision, not an oversight. dial is nil here
-	// deliberately - http_probes has no dialer-selection helper of its
-	// own yet, so this falls back to support.scanPorts' own plain
-	// default, the same as everywhere else in this codebase when no
-	// dialer is explicitly injected; a future active-proxy-egress
-	// integration point, not something needed today. See
-	// support.OpenPortsForFQDN's own doc comment for the full
-	// reasoning this originated from.
-	ports := support.OpenPortsForFQDN(e, host, nil)
+	// hops) and reads back whatever port_prefilter has already
+	// discovered for each one - not the full, static Scope.Ports list
+	// directly, and (as of this handler's own history) not an active
+	// trigger either. A live goroutine dump during a real, large-scale
+	// enumeration showed every one of this handler's own concurrency
+	// slots simultaneously blocked inside a fresh scan at once,
+	// entirely displacing this handler's actual work for extended
+	// stretches - see support.OpenPortsForFQDN's own doc comment for
+	// the full history and the accepted tradeoff this reversion makes
+	// (a brand-new IP may be skipped on this specific pass if it
+	// hasn't been scanned yet, recoverable on a later pass rather than
+	// blocking this one). This only changes which ports get tried; the
+	// actual connection target below (proto + "://" + fqdn.Name + ":"
+	// + port, in probeOnePort) is untouched, so this handler's whole
+	// reason for existing - connecting by hostname for correct,
+	// unambiguous SNI on virtually-hosted targets, rather than by a
+	// bare, possibly-shared IP - is fully preserved. A hostname
+	// resolving to several, differently-configured IPs means this can
+	// over-include ports only genuinely open on one of them; a
+	// deliberate tradeoff toward completeness over precision, not an
+	// oversight.
+	ports := support.OpenPortsForFQDN(e.Session.Ctx(), e.Session, host)
 
 	// Most-likely-to-be-open ports first (nmap's own real, published
 	// frequency data) - see protocol_probes' identical use of this,
