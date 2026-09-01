@@ -472,3 +472,49 @@ func OpenPortCountForIP(ctx context.Context, session et.Session, ent *dbt.Entity
 	}
 	return count
 }
+
+// OpenPortsForFQDN resolves ent (expected to be an FQDN) to its own
+// IPs via ResolvedIPsForFQDN, and unions OpenPortsForIP's own,
+// already-cached results across all of them. Deliberately passive -
+// unlike an earlier version of this function, it never triggers a
+// fresh port_prefilter scan itself.
+//
+// That earlier, active-triggering version was built to close a real
+// cross-pipeline race (this FQDN-triggered path has no ordering
+// guarantee relative to port_prefilter's own, separate
+// IPAddress-triggered path - see EnsureOpenPortsScanned's own doc
+// comment for that reasoning, still accurate). But a live goroutine
+// dump taken during a real, large-scale enumeration showed every one
+// of this handler's own concurrency slots simultaneously blocked
+// inside a fresh scan at once - the active-triggering fix traded a
+// narrower, occasional race for a worse, systemic one: once the
+// separate IPAddress pipeline drains ahead of a much larger FQDN
+// backlog, every slot ends up doing port_prefilter's own job
+// synchronously, sequentially, entirely displacing this handler's
+// real work (HTTP probing) for extended stretches.
+//
+// Reverting to a passive read reopens the original, narrower race - a
+// brand-new IP might not be scanned yet when this specific FQDN is
+// reached, so it's skipped for SNI-correct probing on this particular
+// pass - but that IP still gets scanned regardless, independently,
+// via its own IPAddress-triggered path (dns/ip.go dispatches it
+// either way), and a second pass (whether from this FQDN re-resolving
+// later, or a different FQDN sharing the same IP) picks up the cached
+// result normally. A real, accepted tradeoff, not an oversight -
+// chosen deliberately over the alternatives after the goroutine dump
+// made the systemic cost of the active-triggering version clear.
+func OpenPortsForFQDN(ctx context.Context, session et.Session, ent *dbt.Entity) []int {
+	seen := make(map[int]struct{})
+	var ports []int
+
+	for _, ip := range ResolvedIPsForFQDN(ctx, session, ent) {
+		for _, port := range OpenPortsForIP(ctx, session, ip) {
+			if _, dup := seen[port]; dup {
+				continue
+			}
+			seen[port] = struct{}{}
+			ports = append(ports, port)
+		}
+	}
+	return ports
+}

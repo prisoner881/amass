@@ -50,12 +50,32 @@ const PortPrefilterScanTimeout = 2 * time.Second
 // maxConcurrentPortsPerIP bounds how many of a single IP's own ports
 // get connect-attempted at once. Deliberately not unbounded -
 // launching one goroutine per port for an nmap-top-1000-scale sweep,
-// all at once, for a single IP, would multiply instantaneous pressure
-// on the shared, session-wide NetSem connection semaphore far more
-// sharply than protocol_probes' own sequential-per-IP design ever
-// did, for a stage whose entire purpose is to be a cheap, early
-// filter rather than a new bottleneck of its own.
-const maxConcurrentPortsPerIP = 25
+// all at once, for a single IP, would create very large instantaneous
+// connection counts for a stage whose entire purpose is to be a
+// cheap, early filter rather than a new bottleneck of its own.
+//
+// Raised from an original value of 25 specifically to address a real,
+// confirmed problem: a live goroutine dump during a large-scale
+// enumeration showed every one of http_probes' fqdn_endpoint.go
+// concurrency slots simultaneously blocked inside a single scan at
+// once, each taking up to ~80 seconds at the original concurrency
+// level - full details in fqdn_endpoint.go's own history. 100 roughly
+// quarters that worst case; it mitigates the severity of that
+// specific failure mode, it doesn't eliminate it on its own (see
+// OpenPortsForFQDN's own doc comment in database.go for the actual,
+// structural fix that does).
+//
+// Worth being explicit about a real, known gap this raises the stakes
+// on slightly: unlike protocol_probes, scanPorts never acquires the
+// shared, session-wide NetSem connection semaphore at all - it only
+// ever respects this constant's own, local, per-call bound. This is a
+// deliberate exemption, not an oversight (port_prefilter's own
+// connections are short-lived and empirically shown, at real scale,
+// to rarely find open ports at all), but it does mean this constant
+// is the only thing bounding this specific stage's own instantaneous
+// connection count - there is no shared backstop catching it if this
+// value were raised much further.
+const maxConcurrentPortsPerIP = 100
 
 var scanGroup singleflight.Group
 
@@ -224,42 +244,4 @@ func scanPorts(ctx context.Context, dial amassnet.DialContext, addr string, port
 	wg.Wait()
 
 	return open
-}
-
-// OpenPortsForFQDN resolves ent (expected to be an FQDN) to its own
-// IPs via ResolvedIPsForFQDN, calls EnsureOpenPortsScanned for each
-// one, and returns the union of whatever ports came back open across
-// all of them. Unlike EnsureOpenPortsScanned's own single-IP contract,
-// this actively triggers a scan on each resolved IP if one hasn't
-// happened yet, rather than only reading back an existing result -
-// necessary because http_probes' fqdn_endpoint.go may well reach a
-// given IP before port_prefilter's own, separate IPAddress-pipeline
-// position ever does (see EnsureOpenPortsScanned's own doc comment
-// for the full cross-pipeline ordering reasoning).
-//
-// This only ever changes which ports get tried by the caller - never
-// the actual connection target, which fqdn_endpoint.go always builds
-// from the FQDN's own name, not from any IP this function touches -
-// so fqdn_endpoint.go's whole reason for existing (connecting by
-// hostname for correct, unambiguous SNI on virtually-hosted targets,
-// rather than by a bare, possibly-shared IP) is fully preserved. A
-// hostname resolving to several, differently-configured IPs means
-// this can over-include ports only genuinely open on one of them - a
-// deliberate tradeoff toward completeness over precision, not an
-// oversight; see the design discussion this function originated from
-// for the full reasoning.
-func OpenPortsForFQDN(e *et.Event, ent *dbt.Entity, dial amassnet.DialContext) []int {
-	seen := make(map[int]struct{})
-	var ports []int
-
-	for _, ip := range ResolvedIPsForFQDN(e.Session.Ctx(), e.Session, ent) {
-		for _, port := range EnsureOpenPortsScanned(e, ip, dial) {
-			if _, dup := seen[port]; dup {
-				continue
-			}
-			seen[port] = struct{}{}
-			ports = append(ports, port)
-		}
-	}
-	return ports
 }
