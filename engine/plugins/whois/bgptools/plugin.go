@@ -142,6 +142,38 @@ func (bt *bgpTools) whois(ctx context.Context, ipstr string) (*bgpToolsRecord, e
 	}
 	defer func() { _ = conn.Close() }()
 
+	// Apply the context deadline to the connection itself. Without
+	// this, the 10-second timeout above bounds only the dial: once the
+	// TCP handshake completes, neither io.WriteString nor io.ReadAll
+	// below is context-aware, so a server that accepts the connection
+	// and then never sends nor closes leaves ReadAll blocked until the
+	// OS-level TCP keepalive gives up - potentially hours.
+	//
+	// That is not hypothetical. It was observed in production against
+	// the real BGP.Tools service: one goroutine parked in io.ReadAll
+	// while two others sat on netblock.check's mutex for 12 minutes,
+	// and the whole engine went silent behind it. netblock.check holds
+	// that shared mutex across this entire call - deliberately, to stop
+	// concurrent duplicate lookups for the same netblock - and every
+	// IPAddress event not already covered by the session CIDRanger must
+	// pass through it. So one hung socket stalls the IPAddress pipeline
+	// completely, and with it everything downstream. Nothing is even
+	// logged, because query()'s error path only runs once this function
+	// returns, which it never does.
+	//
+	// The likely trigger is rate limiting: the faster the enumeration
+	// discovers novel IPs, the faster this endpoint is queried, and
+	// stalling an accepted connection is a common way to shed load.
+	// Reusing ctx's own deadline rather than inventing a second timeout
+	// keeps the whole exchange - dial, write and read - inside the one
+	// budget already established above. A stalled server now yields an
+	// error, query() logs it, check() returns, and the mutex is
+	// released; that IP simply goes without netblock data, which is
+	// degraded rather than fatal.
+	if deadline, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(deadline)
+	}
+
 	n, err := io.WriteString(conn, fmt.Sprintf("begin\n%s\nend", ipstr))
 	if err != nil || n == 0 {
 		return nil, fmt.Errorf("failed to send the request to the WHOIS server: %v", err)
