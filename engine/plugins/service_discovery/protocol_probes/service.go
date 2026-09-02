@@ -113,4 +113,32 @@ func storeRelease(e *et.Event, svcEntity *dbt.Entity, src *et.Source, productEnt
 	srcProp := &general.SourceProperty{Source: src.Name, Confidence: src.Confidence}
 	_, _ = e.Session.DB().CreateEntityProperty(ctx, releaseEntity, srcProp)
 	_, _ = e.Session.DB().CreateEdgeProperty(ctx, edge, srcProp)
+
+	// Second, direct edge from the Service to the ProductRelease.
+	//
+	// The "release" edge above originates at the Product, and Product
+	// entities are globally deduplicated by name (their Key() is the
+	// name-derived ID), so every version of a given product discovered
+	// anywhere in the enumeration accumulates on that single shared
+	// node. That makes the Product->ProductRelease edge useless for
+	// answering "which version is THIS host running" - a host running
+	// nginx 1.18.0 is indistinguishable from one running 1.30.4 once
+	// both versions exist in the estate. Confirmed against real data:
+	// two UB hosts verified by nmap as nginx 1.18.0 each resolved to
+	// six candidate releases through the Product node.
+	//
+	// ProductRelease is deduplicated by name too, so the release entity
+	// stays shared; only the edge is per-Service, which is exactly the
+	// missing fact. The Product-originating edge is deliberately left
+	// in place rather than replaced, so nothing already consuming it
+	// changes behavior.
+	svcEdge, err := e.Session.DB().CreateEdge(ctx, &dbt.Edge{
+		Relation:   &general.SimpleRelation{Name: "release_used"},
+		FromEntity: svcEntity,
+		ToEntity:   releaseEntity,
+	})
+	if err != nil || svcEdge == nil {
+		return
+	}
+	_, _ = e.Session.DB().CreateEdgeProperty(ctx, svcEdge, srcProp)
 }
