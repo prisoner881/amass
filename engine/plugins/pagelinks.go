@@ -9,6 +9,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,7 @@ import (
 	dbt "github.com/owasp-amass/asset-db/types"
 	oam "github.com/owasp-amass/open-asset-model"
 	oamdns "github.com/owasp-amass/open-asset-model/dns"
+	oamfile "github.com/owasp-amass/open-asset-model/file"
 	oamgen "github.com/owasp-amass/open-asset-model/general"
 	oamnet "github.com/owasp-amass/open-asset-model/network"
 	oamplat "github.com/owasp-amass/open-asset-model/platform"
@@ -112,8 +114,8 @@ func (pl *pageLinks) check(e *et.Event) error {
 
 	var names []*dbt.Entity
 	if !support.AssetMonitoredWithinTTL(e.Session, e.Entity, pl.source, since) {
-		if base := pl.originURL(e, since); base != nil {
-			names = append(names, pl.harvest(e, serv.Output, base)...)
+		if base, parent := pl.originURL(e, since); base != nil {
+			names = append(names, pl.harvest(e, serv.Output, base, parent)...)
 		}
 		support.MarkAssetMonitored(e.Session, e.Entity, pl.source)
 	}
@@ -130,12 +132,13 @@ func (pl *pageLinks) check(e *et.Event) error {
 // edge to distinguish http from https, since Service itself doesn't
 // store a scheme. Needed to resolve relative links (href="/about")
 // into absolute hostnames.
-func (pl *pageLinks) originURL(e *et.Event, since time.Time) *url.URL {
+func (pl *pageLinks) originURL(e *et.Event, since time.Time) (*url.URL, *dbt.Entity) {
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 15*time.Second)
 	defer cancel()
 
 	var host string
 	var port int
+	var parent *dbt.Entity
 	if edges, err := e.Session.DB().IncomingEdges(ctx, e.Entity, since); err == nil {
 		for _, edge := range edges {
 			portrel, ok := edge.Relation.(*oamgen.PortRelation)
@@ -154,11 +157,12 @@ func (pl *pageLinks) originURL(e *et.Event, since time.Time) *url.URL {
 			default:
 				continue
 			}
+			parent = a
 			port = portrel.PortNumber
 		}
 	}
 	if host == "" || port == 0 {
-		return nil
+		return nil, nil
 	}
 
 	scheme := "http"
@@ -173,9 +177,9 @@ func (pl *pageLinks) originURL(e *et.Event, since time.Time) *url.URL {
 
 	u, err := url.Parse(raw)
 	if err != nil {
-		return nil
+		return nil, nil
 	}
-	return u
+	return u, parent
 }
 
 // linkAttrs mirrors the attribute set already used by the (unused,
@@ -189,8 +193,21 @@ var linkAttrs = map[string]bool{
 	"srcset": true, "xmlns": true,
 }
 
-func (pl *pageLinks) harvest(e *et.Event, body string, base *url.URL) []*dbt.Entity {
+// maxLinksPerPage bounds how many distinct link URLs are recorded as
+// provenance for a single page. It is a safety valve against pathological
+// documents - a sitemap or directory index can carry tens of thousands of
+// links - and not a policy limit: at a normal page's few hundred links it
+// never binds.
+//
+// The cap deliberately applies ONLY to URL provenance entities, never to
+// hostname extraction. Every hostname on the page is still discovered and
+// stored regardless of this value, because that is the primary mission;
+// the URLs are supporting detail about where a hostname was seen.
+const maxLinksPerPage = 1000
+
+func (pl *pageLinks) harvest(e *et.Event, body string, base *url.URL, parent *dbt.Entity) []*dbt.Entity {
 	hosts := make(map[string]struct{})
+	links := make(map[string]*url.URL)
 
 	tokenizer := html.NewTokenizer(strings.NewReader(body))
 	for {
@@ -213,8 +230,19 @@ func (pl *pageLinks) harvest(e *et.Event, body string, base *url.URL) []*dbt.Ent
 				continue
 			}
 			h := strings.ToLower(strings.TrimSpace(resolved.Hostname()))
-			if h != "" {
-				hosts[h] = struct{}{}
+			if h == "" {
+				continue
+			}
+			hosts[h] = struct{}{}
+
+			// Fragments are stripped so that /page and /page#section
+			// collapse to one entity - they are the same resource, and
+			// keeping both would inflate the graph for no benefit.
+			resolved.Fragment = ""
+			if raw := resolved.String(); raw != "" {
+				if _, dup := links[raw]; !dup && len(links) < maxLinksPerPage {
+					links[raw] = resolved
+				}
 			}
 		}
 	}
@@ -225,13 +253,192 @@ func (pl *pageLinks) harvest(e *et.Event, body string, base *url.URL) []*dbt.Ent
 		names = append(names, h)
 	}
 
-	return pl.store(e, names)
+	entities := pl.store(e, names)
+	pl.storeProvenance(e, base, parent, links, entities)
+	return entities
 }
 
 func (pl *pageLinks) store(e *et.Event, names []string) []*dbt.Entity {
 	return support.StoreFQDNsWithSource(e.Session, names, pl.source, pl.name, pl.name+"-Handler")
 }
 
+// storeProvenance records WHERE each discovered hostname was seen, by
+// building the chain the Open Asset Model already sanctions for exactly
+// this purpose:
+//
+//	URL(page) --file--> File --contains--> URL(link) --domain--> FQDN
+//
+// Every hop is a declared relation: urlRels permits "file" to File and
+// "domain" to FQDN, and fileRels permits "contains" to URL. No model
+// extension is required, and CreateEdge validates all three against
+// ValidRelationship, so a wrong label fails rather than silently doing
+// nothing. Modeling the fetched page itself as a File matches the model's
+// own definition - a File is any web-accessible resource retrieved over
+// HTTP - and "contains" is documented as linking content discovered in a
+// File into the greater graph, which is precisely what a page link is.
+//
+// This is additive. The FQDN entities and their dispatch are unchanged,
+// so hostname discovery behaves exactly as before whether or not any of
+// the work below succeeds. Failures here are logged and abandoned rather
+// than propagated, for the same reason: provenance detail must never be
+// able to cost an asset.
+//
+// Note this creates a URL entity per distinct link, which is the dominant
+// cost of the feature - a page with 200 links mints up to 200 entities
+// plus one File. On a persistent database re-enumerated weekly these
+// accumulate, deduplicated by URL. maxLinksPerPage bounds the worst case.
+func (pl *pageLinks) storeProvenance(e *et.Event, base *url.URL, parent *dbt.Entity, links map[string]*url.URL, fqdns []*dbt.Entity) {
+	if base == nil || len(links) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 30*time.Second)
+	defer cancel()
+
+	// Index the FQDN entities that store() just created, so each link URL
+	// can be joined to the hostname entity it refers to without a second
+	// round of database lookups.
+	byName := make(map[string]*dbt.Entity, len(fqdns))
+	for _, ent := range fqdns {
+		if fq, ok := ent.Asset.(*oamdns.FQDN); ok {
+			byName[strings.ToLower(fq.Name)] = ent
+		}
+	}
+
+	src := &oamgen.SourceProperty{Source: pl.source.Name, Confidence: pl.source.Confidence}
+
+	originURL := support.RawURLToOAM(base.String())
+	if originURL == nil {
+		return
+	}
+	originEnt, err := e.Session.DB().CreateAsset(ctx, originURL)
+	if err != nil || originEnt == nil {
+		pl.log.Error("failed to create the origin URL asset",
+			"url", base.String(), "error", linkErr(err))
+		return
+	}
+	_, _ = e.Session.DB().CreateEntityProperty(ctx, originEnt, src)
+
+	// The page as a File. Name is left empty for a bare directory or root
+	// path, where a basename would be "/" or "." rather than anything
+	// meaningful.
+	var fname string
+	if p := strings.TrimSuffix(originURL.Path, "/"); p != "" {
+		fname = path.Base(p)
+	}
+	fileEnt, err := e.Session.DB().CreateAsset(ctx, &oamfile.File{
+		URL:  originURL.Raw,
+		Name: fname,
+		Type: "html",
+	})
+	if err != nil || fileEnt == nil {
+		pl.log.Error("failed to create the File asset for the page",
+			"url", originURL.Raw, "error", linkErr(err))
+		return
+	}
+	_, _ = e.Session.DB().CreateEntityProperty(ctx, fileEnt, src)
+
+	if edge, err := e.Session.DB().CreateEdge(ctx, &dbt.Edge{
+		Relation:   &oamgen.SimpleRelation{Name: "file"},
+		FromEntity: originEnt,
+		ToEntity:   fileEnt,
+	}); err == nil && edge != nil {
+		_, _ = e.Session.DB().CreateEdgeProperty(ctx, edge, src)
+	} else {
+		pl.log.Error("failed to create the URL->File edge",
+			"url", originURL.Raw, "error", linkErr(err))
+	}
+
+	// Anchor the origin URL to the host it was served from. Without this
+	// edge the crawled hostname is only recoverable by reading the URL's
+	// own host attribute, which makes both of the questions this feature
+	// exists to answer into text joins rather than graph traversals:
+	//
+	//   "which FQDN was crawled to find this one" walks backwards
+	//   FQDN <-domain- URL <-contains- File <-file- URL(origin) -domain-> FQDN(origin)
+	//
+	//   "what did crawling this FQDN find" walks the same path forwards,
+	//   starting from the incoming domain edges of FQDN(origin).
+	//
+	// The second direction relies on incoming-edge traversal because
+	// fqdnRels declares no outgoing relation toward URL - an FQDN cannot
+	// point at a URL in this model, only the reverse - so the edge has to
+	// exist for the question to be answerable at all.
+	//
+	// The relation label depends on what the Service hangs off: urlRels
+	// permits "domain" to FQDN and "ip_address" to IPAddress, and an
+	// http_probes Service can be parented by either.
+	if parent != nil {
+		var label string
+		switch parent.Asset.(type) {
+		case *oamdns.FQDN:
+			label = "domain"
+		case *oamnet.IPAddress:
+			label = "ip_address"
+		}
+		if label != "" {
+			if edge, err := e.Session.DB().CreateEdge(ctx, &dbt.Edge{
+				Relation:   &oamgen.SimpleRelation{Name: label},
+				FromEntity: originEnt,
+				ToEntity:   parent,
+			}); err == nil && edge != nil {
+				_, _ = e.Session.DB().CreateEdgeProperty(ctx, edge, src)
+			} else {
+				pl.log.Error("failed to anchor the origin URL to its host",
+					"url", originURL.Raw, "relation", label, "error", linkErr(err))
+			}
+		}
+	}
+
+	for raw, link := range links {
+		linkURL := support.RawURLToOAM(raw)
+		if linkURL == nil {
+			continue
+		}
+		linkEnt, err := e.Session.DB().CreateAsset(ctx, linkURL)
+		if err != nil || linkEnt == nil {
+			continue
+		}
+		_, _ = e.Session.DB().CreateEntityProperty(ctx, linkEnt, src)
+
+		if edge, err := e.Session.DB().CreateEdge(ctx, &dbt.Edge{
+			Relation:   &oamgen.SimpleRelation{Name: "contains"},
+			FromEntity: fileEnt,
+			ToEntity:   linkEnt,
+		}); err == nil && edge != nil {
+			_, _ = e.Session.DB().CreateEdgeProperty(ctx, edge, src)
+		}
+
+		// Join the link back to the hostname entity it names. The lookup
+		// is against the resolved URL's host rather than the raw
+		// attribute value, so relative links resolve to the origin's own
+		// hostname exactly as harvest() recorded it.
+		host := strings.ToLower(strings.TrimSpace(link.Hostname()))
+		fqdnEnt, ok := byName[host]
+		if !ok {
+			continue
+		}
+		if edge, err := e.Session.DB().CreateEdge(ctx, &dbt.Edge{
+			Relation:   &oamgen.SimpleRelation{Name: "domain"},
+			FromEntity: linkEnt,
+			ToEntity:   fqdnEnt,
+		}); err == nil && edge != nil {
+			_, _ = e.Session.DB().CreateEdgeProperty(ctx, edge, src)
+		}
+	}
+}
+
 func (pl *pageLinks) process(e *et.Event, assets []*dbt.Entity) {
 	support.ProcessFQDNsWithSource(e, assets, pl.source)
+}
+
+// linkErr renders an error for logging without assuming it is non-nil.
+// The database helpers used above can return (nil, nil) - a failure with
+// no error value - so calling err.Error() directly on these paths would
+// turn a logged warning into a panic.
+func linkErr(err error) string {
+	if err == nil {
+		return "no error returned, but the operation produced no entity"
+	}
+	return err.Error()
 }
