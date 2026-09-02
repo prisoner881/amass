@@ -331,15 +331,40 @@ func StoreOpenPort(ctx context.Context, session et.Session, ent *dbt.Entity, por
 	return err
 }
 
-// OpenPortsForIP returns every port previously confirmed open (via
-// StoreOpenPort) on the given entity, expected to be an IPAddress.
-// Returns an empty slice, not an error, if none exist yet or the
-// lookup fails - the same "nothing found is not exceptional" contract
-// as ResolvingFQDNs and PreferredSNIHostname above, since a genuinely
-// new IP that the port_prefilter hasn't reached yet is an expected,
-// ordinary state, not a fault condition.
-func OpenPortsForIP(ctx context.Context, session et.Session, ent *dbt.Entity) []int {
-	tags, err := session.DB().FindEntityTags(ctx, ent, time.Time{}, openPortPropertyName)
+// OpenPortsForIP returns every port confirmed open (via StoreOpenPort)
+// on the given entity, expected to be an IPAddress, whose confirmation
+// is no older than since. Returns an empty slice, not an error, if none
+// exist yet or the lookup fails - the same "nothing found is not
+// exceptional" contract as ResolvingFQDNs and PreferredSNIHostname
+// above, since a genuinely new IP that the port_prefilter hasn't
+// reached yet is an expected, ordinary state, not a fault condition.
+//
+// since is required rather than optional, and callers should pass
+// PrefilterTTLStartTime's value. This previously passed time.Time{},
+// which disables the filter entirely and returns every open_port
+// property ever written for the entity. That is correct for a
+// throwaway database but wrong for a persistent one: nothing prunes
+// these properties, and a rescan that finds a port closed does not
+// remove the existing property - it simply stops refreshing it. The
+// set therefore only ever grows, so a port open once is reported open
+// forever. Three consequences, all bad on a re-enumeration schedule:
+// the expensive downstream probes (http_probes, protocol_probes) keep
+// paying full connect timeouts on ports that closed long ago; a
+// closure can never be detected, which defeats the point of
+// re-enumerating; and the resulting data reports exposure that no
+// longer exists, which is the one place in this pipeline the error
+// runs toward false positives rather than false negatives.
+//
+// Filtering on since is safe because the underlying lookup tests
+// updated_at, not created_at, and the tag upsert refreshes updated_at
+// on conflict (verified against asset-db's entity_get_tags and
+// entity_tag_upsert). A still-open port re-confirmed by any later scan
+// keeps its timestamp current and stays visible; only ports that
+// stopped being confirmed age out. Within a single enumeration nothing
+// changes at all, since properties written moments earlier sit well
+// inside any TTL window.
+func OpenPortsForIP(ctx context.Context, session et.Session, ent *dbt.Entity, since time.Time) []int {
+	tags, err := session.DB().FindEntityTags(ctx, ent, since, openPortPropertyName)
 	if err != nil {
 		return nil
 	}

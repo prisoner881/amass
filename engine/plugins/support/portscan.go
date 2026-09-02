@@ -62,18 +62,37 @@ const PortPrefilterScanTimeout = 2 * time.Second
 // confirmed regression at real scale: port_prefilter runs at
 // support.HighHandlerInstances (32) concurrent handler instances, so
 // 32 x 100 = 3,200 peak simultaneous connections - verified, via
-// `docker exec engine sh -c 'ulimit -n'`, to exceed this deployment's
-// actual 1,024 file-descriptor ceiling by a wide margin, versus
+// `docker exec engine sh -c 'ulimit -n'`, to exceed the deployment's
+// then-current 1,024 file-descriptor ceiling by a wide margin, versus
 // 32 x 25 = 800 at the original value, comfortably under it. The
 // practical effect was total, sustained silence across the entire
 // engine, not just this stage - scanPorts never acquires the shared,
 // session-wide NetSem semaphore at all (a deliberate exemption, see
 // below), so nothing else in the system caught this before every
 // dial() attempt, from any plugin needing a socket, started failing.
-// Reverted back to 25 for this reason, paired with shrinking the
-// configured port range itself (nmap-top-1000 down to nmap-top-100)
-// so total scan time per IP still improves meaningfully without
-// touching this constant again.
+// Reverted to 25 for that reason, paired with shrinking the configured
+// port range itself (nmap-top-1000 down to nmap-top-100).
+//
+// Now 100 again, but on a different footing: the file-descriptor
+// ceiling that made the earlier raise fatal has been removed. The
+// engine container is deployed with an explicit nofile limit of 8,192
+// (compose.yaml), confirmed at runtime by the same `ulimit -n` check
+// that originally diagnosed the failure. Full worst-case arithmetic at
+// this value: 32 x 100 = 3,200 from port_prefilter's own handler,
+// 16 x 100 = 1,600 from http_probes' fqdn_endpoint (which scans its
+// resolved IPs sequentially, so 100 per slot, not per IP), plus
+// NetSem's own 500 - roughly 5,300 against 8,192, leaving about 35%
+// headroom.
+//
+// The measurement that motivated it: at 25, with a 100-port list, a
+// cold scan runs four sequential batches of PortPrefilterScanTimeout,
+// so ~8s per IP. A live run showed fqdn_endpoint's 16 handler slots
+// averaging 9.4s of occupancy per event - saturated, doing almost
+// nothing but scanning - which stalled service detection entirely
+// (NetSem idle at 0/500 while Service, URL, TLSCertificate and Product
+// counts flatlined, since scanPorts holds a slot without holding a
+// NetSem token). At 100, one batch covers the whole list, so the same
+// scan is ~2s and those slots return to HTTP probing between scans.
 //
 // Worth being explicit about the same, still-standing gap this
 // history exposed: unlike protocol_probes, scanPorts never acquires
@@ -82,8 +101,12 @@ const PortPrefilterScanTimeout = 2 * time.Second
 // oversight, but it's the reason this constant alone is what
 // determines this stage's own worst-case instantaneous connection
 // count, and why raising it again warrants the same file-descriptor
-// math shown above, not just a throughput judgment call.
-const maxConcurrentPortsPerIP = 25
+// math shown above, not just a throughput judgment call. Note also
+// that the 8,192 limit is a property of the deployment, not of this
+// code: this value and that ulimit have to move together, and a
+// deployment that does not set it inherits Docker's 1,024 default and
+// will reproduce the original failure exactly.
+const maxConcurrentPortsPerIP = 100
 
 var scanGroup singleflight.Group
 
@@ -124,6 +147,21 @@ var scanGroup singleflight.Group
 // guards against with a mutex, applied here with a purpose-built tool
 // instead of a hand-rolled lock, since x/sync/singleflight was
 // already an indirect dependency of this module.
+// PrefilterTTLStartTime returns the cutoff before which a stored
+// open_port property is considered stale. It is the single source of
+// truth for that window: EnsureOpenPortsScanned uses it to decide
+// whether an IP needs rescanning at all, and the passive consumers
+// (http_probes' ipaddr_endpoint, protocol_probes) use the same value
+// when reading results back, so "we did not rescan because the data is
+// fresh" and "this is the data we consider fresh" can never disagree.
+//
+// Deriving both from one call also means the window follows the
+// IPAddress->IPAddress transformation's configured TTL automatically,
+// rather than needing a second constant kept in sync by hand.
+func PrefilterTTLStartTime(session et.Session) (time.Time, error) {
+	return TTLStartTime(session.Config(), string(oam.IPAddress), string(oam.IPAddress), PortPrefilterSource.Name)
+}
+
 func EnsureOpenPortsScanned(e *et.Event, ent *dbt.Entity, dial amassnet.DialContext) []int {
 	if _, conf := e.Session.Scope().IsAssetInScope(ent.Asset, 0); conf <= 0 {
 		return nil
@@ -142,13 +180,13 @@ func EnsureOpenPortsScanned(e *et.Event, ent *dbt.Entity, dial amassnet.DialCont
 	result, err, _ := scanGroup.Do(ent.ID, func() (interface{}, error) {
 		ctx := e.Session.Ctx()
 
-		since, err := TTLStartTime(e.Session.Config(), string(oam.IPAddress), string(oam.IPAddress), PortPrefilterSource.Name)
+		since, err := PrefilterTTLStartTime(e.Session)
 		if err != nil {
 			return nil, err
 		}
 
 		if AssetMonitoredWithinTTL(e.Session, ent, PortPrefilterSource, since) {
-			return OpenPortsForIP(ctx, e.Session, ent), nil
+			return OpenPortsForIP(ctx, e.Session, ent, since), nil
 		}
 
 		open := scanPorts(ctx, dial, ip.Address.String(), ports)
