@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
@@ -123,7 +124,7 @@ func (j *jarmPlugin) query(e *et.Event, since time.Time) {
 			if a, err := e.Session.DB().FindEntityById(ctx, edge.FromEntity.ID); err == nil && a != nil {
 				switch a.Asset.(type) {
 				case *oamdns.FQDN:
-					if portrel.Protocol == "TCP" {
+					if strings.EqualFold(portrel.Protocol, "tcp") {
 						t := &fingerprint{
 							asset: e.Entity,
 							port:  edge,
@@ -131,7 +132,7 @@ func (j *jarmPlugin) query(e *et.Event, since time.Time) {
 						targets = append([]*fingerprint{t}, targets...)
 					}
 				case *oamnet.IPAddress:
-					if portrel.Protocol == "TCP" {
+					if strings.EqualFold(portrel.Protocol, "tcp") {
 						targets = append(targets, &fingerprint{
 							asset: e.Entity,
 							port:  edge,
@@ -142,16 +143,37 @@ func (j *jarmPlugin) query(e *et.Event, since time.Time) {
 		}
 	}
 
+	// Logged because this handler is otherwise completely silent about
+	// failing. A real run marked 467 Services as processed by this
+	// plugin and produced zero JARM properties, and there was no way to
+	// tell whether targets was empty or every fingerprint attempt had
+	// failed - the two have entirely different causes and fixes. The
+	// empty-targets case is worth a line of its own for the same reason.
+	if len(targets) == 0 {
+		j.log.Warn("no fingerprint targets found for the service",
+			"asset", e.Entity.Asset.Key())
+		return
+	}
+
 	var results []*fingerprint
 	for _, target := range targets {
 		portrel := target.port.Relation.(*oamgen.PortRelation)
-		if fp, err := support.JARMFingerprint(e.Session, target.asset.Asset, portrel); err == nil && fp != "" {
-			results = append(results, &fingerprint{
-				asset: target.asset,
-				port:  target.port,
-				hash:  fp,
-			})
+		fp, err := support.JARMFingerprint(e.Session, target.asset.Asset, portrel)
+		if err != nil {
+			j.log.Warn("failed to obtain the JARM fingerprint",
+				"asset", target.asset.Asset.Key(), "port", portrel.PortNumber, "error", err.Error())
+			continue
 		}
+		if fp == "" {
+			j.log.Warn("the JARM fingerprint returned empty",
+				"asset", target.asset.Asset.Key(), "port", portrel.PortNumber)
+			continue
+		}
+		results = append(results, &fingerprint{
+			asset: target.asset,
+			port:  target.port,
+			hash:  fp,
+		})
 	}
 
 	if len(results) > 0 {

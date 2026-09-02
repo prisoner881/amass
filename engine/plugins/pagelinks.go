@@ -139,7 +139,7 @@ func (pl *pageLinks) originURL(e *et.Event, since time.Time) *url.URL {
 	if edges, err := e.Session.DB().IncomingEdges(ctx, e.Entity, since); err == nil {
 		for _, edge := range edges {
 			portrel, ok := edge.Relation.(*oamgen.PortRelation)
-			if !ok || portrel.Protocol != "TCP" {
+			if !ok || !strings.EqualFold(portrel.Protocol, "tcp") {
 				continue
 			}
 			a, err := e.Session.DB().FindEntityById(ctx, edge.FromEntity.ID)
