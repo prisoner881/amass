@@ -140,10 +140,20 @@ func (hp *httpProbing) store(e *et.Event, resp *amasshttp.Response, entity *dbt.
 		}
 	}
 
+	// Lowercase "tcp", matching protocol_probes' certharvest.go and the
+	// "tcp" already passed to ServiceWithIdentifier just above. This was
+	// "TCP", which made the same concept spelled two ways inside one
+	// file and two ways across the two plugins that create Services.
+	// Consumers comparing the field exactly (jarm.go, pagelinks.go)
+	// therefore matched http_probes' services and silently skipped every
+	// protocol_probes one. Those consumers now compare case-insensitively
+	// as well, so neither spelling can break them again - belt and
+	// braces, since a persistent database still holds "TCP" rows written
+	// before this change.
 	portrel := &oamgen.PortRelation{
 		Name:       fmt.Sprintf("tcp_port_%d", port),
 		PortNumber: port,
-		Protocol:   "TCP",
+		Protocol:   "tcp",
 	}
 
 	s, err := support.CreateServiceAsset(e.Session, entity, portrel, serv, c)
