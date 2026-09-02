@@ -122,11 +122,27 @@ func (j *jarmPlugin) query(e *et.Event, since time.Time) {
 				continue
 			}
 			if a, err := e.Session.DB().FindEntityById(ctx, edge.FromEntity.ID); err == nil && a != nil {
+				// asset is `a` - the FQDN or IPAddress on the FROM side
+				// of the port relation - and never e.Entity, which is
+				// the Service. support.JARMFingerprint type-switches its
+				// target to derive a hostname and returns "target must
+				// be a FQDN or IPAddress" for anything else, so passing
+				// the Service made every single call fail: 256 of them
+				// in one real run, with zero JARM properties ever
+				// written, in an enumeration where the handler was
+				// otherwise working correctly end to end.
+				//
+				// The switch below validates `a` and then the value
+				// stored has to be `a` as well. Using `switch
+				// a.Asset.(type)` rather than binding the value is what
+				// let the two drift apart unnoticed - the type check
+				// reads as though it constrains what gets used, and it
+				// does not.
 				switch a.Asset.(type) {
 				case *oamdns.FQDN:
 					if strings.EqualFold(portrel.Protocol, "tcp") {
 						t := &fingerprint{
-							asset: e.Entity,
+							asset: a,
 							port:  edge,
 						}
 						targets = append([]*fingerprint{t}, targets...)
@@ -134,7 +150,7 @@ func (j *jarmPlugin) query(e *et.Event, since time.Time) {
 				case *oamnet.IPAddress:
 					if strings.EqualFold(portrel.Protocol, "tcp") {
 						targets = append(targets, &fingerprint{
-							asset: e.Entity,
+							asset: a,
 							port:  edge,
 						})
 					}
