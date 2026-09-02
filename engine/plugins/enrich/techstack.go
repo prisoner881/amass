@@ -267,8 +267,20 @@ func (ts *techStack) storeRelease(e *et.Event, serv *oamplat.Service, productEnt
 	// changes behavior. e.Entity is the Service entity here: this
 	// plugin's handler is registered on oam.Service, and check() asserts
 	// e.Entity.Asset to *oamplat.Service before detect() is ever called.
+	// The label must be "product_used", not an invented one. Edges are
+	// validated by open-asset-model's ValidRelationship against a fixed
+	// table, and serviceRels permits exactly four labels out of a
+	// Service: provider, certificate, terms_of_service and product_used.
+	// An earlier version of this used "release_used", which CreateEdge
+	// rejected silently on every call - 86 attempts in one run, zero
+	// edges created. Conveniently the model already anticipated this
+	// case: product_used is declared valid to BOTH Product and
+	// ProductRelease, so pointing a second product_used edge at the
+	// release is the sanctioned way to express "this service runs this
+	// version". Consumers distinguish the two by the target entity's
+	// type, not by the label.
 	svcEdge, err := e.Session.DB().CreateEdge(ctx, &dbt.Edge{
-		Relation:   &general.SimpleRelation{Name: "release_used"},
+		Relation:   &general.SimpleRelation{Name: "product_used"},
 		FromEntity: e.Entity,
 		ToEntity:   releaseEntity,
 	})
