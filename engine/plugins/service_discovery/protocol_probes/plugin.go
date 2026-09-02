@@ -226,6 +226,17 @@ func (pp *protocolProbes) probeOnePort(e *et.Event, dial amassnet.DialContext, a
 
 	result := PeekBanner(e.Session.Ctx(), dial, target, PeekTimeout)
 	if result.Err != nil {
+		// This was a silent return, and it was the single hardest thing
+		// to diagnose in this plugin: a dial failure here produces no
+		// service, no log line, and check() still reaches
+		// MarkAssetMonitored, so the asset looks successfully processed
+		// and is TTL-suppressed from being retried. A failure to connect
+		// to a port the pre-filter confirmed open only minutes earlier
+		// is genuinely notable - it means the target changed, or
+		// something in the path is rate-limiting us - and it should not
+		// be invisible.
+		pp.log.Warn("banner peek failed to connect",
+			"target", target, "error", result.Err.Error())
 		return
 	}
 
