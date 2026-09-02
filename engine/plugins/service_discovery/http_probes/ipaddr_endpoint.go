@@ -104,7 +104,19 @@ func (r *ipaddrEndpoint) query(e *et.Event, ipaddr *dbt.Entity) []*support.Findi
 	// specific IP (support.OpenPortsForIP), rather than the full,
 	// static Scope.Ports list directly - see port_prefilter's own doc
 	// comment for the full design reasoning behind this change.
-	ports := support.OpenPortsForIP(e.Session.Ctx(), e.Session, ipaddr)
+	//
+	// Scoped to the prefilter's own freshness window so that ports
+	// which have since closed are not probed indefinitely on a
+	// persistent database. Failing closed on an unresolvable window is
+	// deliberate and costs nothing: the same error would have stopped
+	// EnsureOpenPortsScanned from storing any ports in the first place,
+	// so there would be nothing here to read either way.
+	since, err := support.PrefilterTTLStartTime(e.Session)
+	if err != nil {
+		return nil
+	}
+
+	ports := support.OpenPortsForIP(e.Session.Ctx(), e.Session, ipaddr, since)
 
 	// Most-likely-to-be-open ports first (nmap's own real, published
 	// frequency data) - see protocol_probes' own identical use of this
