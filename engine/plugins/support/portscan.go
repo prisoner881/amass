@@ -206,6 +206,30 @@ func EnsureOpenPortsScanned(e *et.Event, ent *dbt.Entity, dial amassnet.DialCont
 		// threshold happens to define "likely decoy" at query time.
 		_ = StoreOpenPortCount(ctx, e.Session, ent, len(open))
 
+		// Prune AFTER storing, never before. Deleting first and then
+		// writing the fresh set would leave a window - brief, but real
+		// - in which this IP has no open_port properties at all.
+		// scanGroup serializes concurrent scans of the same entity but
+		// nothing serializes readers, so a passive consumer
+		// (ipaddr_endpoint, protocol_probes) landing in that window
+		// would see an empty port list, skip probing entirely, and
+		// mark itself monitored for the full TTL. That is exactly the
+		// starvation failure already observed in protocol_probes, and
+		// writing first avoids it: the entity holds a complete, valid
+		// set at every instant, and only genuinely stale rows are
+		// removed.
+		//
+		// Skipped when the session context is already cancelled. In
+		// that case scanPorts returned early with a partial result,
+		// and pruning against it would delete ports that are open but
+		// simply were not reached before shutdown. Leaving stale rows
+		// behind for one pass is recoverable; deleting live ones is
+		// not, and OpenPortsForIP's since filter already prevents the
+		// survivors from affecting anything downstream.
+		if ctx.Err() == nil {
+			_ = PruneStalePortData(ctx, e.Session, ent, open)
+		}
+
 		// Marked monitored unconditionally, even when open is empty -
 		// this is what makes "genuinely scanned, nothing open" and
 		// "never scanned yet" distinguishable from each other, rather

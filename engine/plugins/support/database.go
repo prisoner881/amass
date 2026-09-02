@@ -463,37 +463,74 @@ func StoreOpenPortCount(ctx context.Context, session et.Session, ent *dbt.Entity
 	return err
 }
 
-// OpenPortCountForIP returns the most recently stored open-port count
-// for ent (expected to be an IPAddress), or 0 if none has ever been
-// stored - the same "nothing found is not exceptional" contract as
-// OpenPortsForIP and the other lookup helpers in this file, since an
-// IP port_prefilter hasn't reached yet is an ordinary, expected state,
-// not a fault condition.
-func OpenPortCountForIP(ctx context.Context, session et.Session, ent *dbt.Entity) int {
-	tags, err := session.DB().FindEntityTags(ctx, ent, time.Time{}, openPortCountPropertyName)
-	if err != nil || len(tags) == 0 {
+// PruneStalePortData deletes every open_port property on ent whose
+// port is not in keep, and every open_port_count property whose value
+// is not len(keep). Returns the number of properties removed.
+//
+// This is what makes stored port data mean "the ports open as of the
+// most recent completed scan" rather than "every port ever seen open".
+// No open/closed history is retained by design: a port that stops
+// answering simply ceases to exist here, which is both what consumers
+// want and what keeps the entity_tag table from accumulating rows
+// indefinitely across repeated enumerations of the same asset.
+//
+// Pruning is by VALUE, not by timestamp, and that choice is load-
+// bearing. A timestamp cutoff would have to compare a Go-side clock
+// reading against updated_at values written by Postgres's own now(),
+// so any clock skew between the engine and the database could make
+// properties written seconds ago look older than the cutoff and get
+// deleted. Comparing port numbers against the set just observed open
+// has no such dependency and is exactly as expressive, since no
+// history is being kept.
+//
+// Callers must only invoke this after a scan that ran to completion.
+// scanPorts returns whatever it managed to collect if the session
+// context is cancelled mid-sweep, and pruning against a partial result
+// would delete ports that are genuinely open but were never reached.
+// EnsureOpenPortsScanned guards this explicitly.
+func PruneStalePortData(ctx context.Context, session et.Session, ent *dbt.Entity, keep []int) int {
+	ports := make(map[string]struct{}, len(keep))
+	for _, port := range keep {
+		ports[strconv.Itoa(port)] = struct{}{}
+	}
+
+	removed := pruneTagsNotIn(ctx, session, ent, openPortPropertyName, ports)
+	removed += pruneTagsNotIn(ctx, session, ent, openPortCountPropertyName,
+		map[string]struct{}{strconv.Itoa(len(keep)): {}})
+	return removed
+}
+
+// pruneTagsNotIn removes every property named name on ent whose value
+// is absent from keep. Individual delete failures are counted as
+// not-removed and otherwise ignored: a row that survives a failed
+// delete is stale but harmless, since OpenPortsForIP's own since
+// filter still excludes it from results, and the next completed scan
+// will attempt the delete again.
+//
+// The lookup deliberately passes time.Time{} rather than a TTL window.
+// Everywhere else in this file an unfiltered read is the bug; here it
+// is the entire point, because the rows this function exists to delete
+// are precisely the ones a TTL window would hide.
+func pruneTagsNotIn(ctx context.Context, session et.Session, ent *dbt.Entity, name string, keep map[string]struct{}) int {
+	tags, err := session.DB().FindEntityTags(ctx, ent, time.Time{}, name)
+	if err != nil {
+		// Includes the ordinary "no tags found for entity" case, which
+		// is not exceptional - a first-ever scan has nothing to prune.
 		return 0
 	}
 
-	// Multiple stored counts are possible if this IP has been scanned
-	// more than once across separate runs without a wipe (the same TTL
-	// re-scan scenario this whole feature already accounts for
-	// elsewhere) - the most recent one (by LastSeen) is the correct,
-	// current answer, not an arbitrary or first-found one.
-	latest := tags[0]
-	for _, tag := range tags[1:] {
-		if tag.LastSeen.After(latest.LastSeen) {
-			latest = tag
+	var removed int
+	for _, tag := range tags {
+		prop, ok := tag.Property.(*oamgen.SimpleProperty)
+		if !ok {
+			continue
+		}
+		if _, found := keep[prop.PropertyValue]; found {
+			continue
+		}
+		if err := session.DB().DeleteEntityTag(ctx, tag.ID); err == nil {
+			removed++
 		}
 	}
-
-	prop, ok := latest.Property.(*oamgen.SimpleProperty)
-	if !ok {
-		return 0
-	}
-	count, err := strconv.Atoi(prop.PropertyValue)
-	if err != nil {
-		return 0
-	}
-	return count
+	return removed
 }
