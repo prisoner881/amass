@@ -158,7 +158,19 @@ func (pp *protocolProbes) check(e *et.Event) error {
 	// probes at the expensive, per-protocol identification stage. See
 	// the port_prefilter package's own doc comment for the full design
 	// reasoning.
-	ports := support.OpenPortsForIP(e.Session.Ctx(), e.Session, e.Entity)
+	// Scoped to port_prefilter's own freshness window so that ports
+	// which have since closed are not probed indefinitely on a
+	// persistent database - see support.OpenPortsForIP's doc comment
+	// for why an unfiltered read only ever grows. Named distinctly from
+	// this plugin's own `since` below, which governs a different
+	// transformation (IPAddress->Service) and may carry a different
+	// configured TTL.
+	prefilterSince, err := support.PrefilterTTLStartTime(e.Session)
+	if err != nil {
+		return err
+	}
+
+	ports := support.OpenPortsForIP(e.Session.Ctx(), e.Session, e.Entity, prefilterSince)
 	if len(ports) == 0 {
 		return nil
 	}
