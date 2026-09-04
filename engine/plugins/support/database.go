@@ -534,3 +534,114 @@ func pruneTagsNotIn(ctx context.Context, session et.Session, ent *dbt.Entity, na
 	}
 	return removed
 }
+
+// registrationContactRels are the RDAP contact relation types trusted as
+// evidence of who a netblock is assigned to.
+//
+// registrant and technical_contact are deliberately EXCLUDED. Registrant
+// email identifiers are barely populated in practice (2 of 64 observed in
+// a real database, versus 58 of 58 for abuse and 62 of 62 for admin), and
+// technical contacts frequently name a third party even on a correctly
+// registered block - a Linode range was observed carrying
+// ip-admin@akamai.com as its technical contact. Abuse and admin contacts
+// are the two the registries treat as authoritative for the assignee.
+var registrationContactRels = []string{"abuse_contact", "admin_contact"}
+
+// NetblockRegisteredToScopedDomain reports whether an IPNetRecord's
+// registration contacts prove the netblock is assigned to an organization
+// already in scope, by walking:
+//
+//	IPNetRecord -abuse_contact|admin_contact-> ContactRecord -id-> Identifier
+//
+// and testing the email address's domain against the session's configured
+// domains with Config().IsDomainInScope - an exact suffix match on a
+// registered domain, never a fuzzy or heuristic comparison.
+//
+// This exists because netblock ownership is otherwise unprovable. IPs
+// discovered by neighbourhood sweep (support.IPAddressSweep) have no FQDN
+// of their own, so HasInScopeFQDN rejects them and they are never scanned
+// - measured at 4,532 discovered-but-unassessed IP-only assets in a single
+// enumeration, many inside blocks the client demonstrably owns. Those are
+// exactly the forgotten hosts this tool exists to find, and an attacker
+// enumerating a netblock does not need a hostname to reach them.
+//
+// The check must be deterministic and must fail closed, because a false
+// positive directs active scan traffic at somebody else's network. Every
+// weaker signal was considered and rejected:
+//
+//   - Organization NAME matching (e.g. "MUZO-NET" against muzo.com) needs
+//     fuzzy comparison, and fuzzy comparison is precisely where a subtle
+//     bug scans an unrelated /16.
+//   - Mere presence in the graph is what caused the original scope
+//     explosion, where any netblock touched by any resolution became
+//     in-scope, pulling in Cloudflare, AWS, Azure and Google ranges.
+//   - Registry allocation TYPE (ASSIGNED PI and similar) indicates
+//     provider independence but not WHO the assignee is.
+//
+// An email domain is the one field that is both machine-comparable and
+// registry-asserted. Verified against real data: cloud and CDN blocks
+// return their own operators (amazon.com, microsoft.com, cloudflare.com,
+// akamai.com) and are correctly rejected, while blocks belonging to the
+// target return the target's own domains and are correctly admitted.
+//
+// Note this deliberately does NOT admit blocks belonging to acquired
+// subsidiaries whose domains are not in the seed list - a block observed
+// registered to tsys.com, a subsidiary of the target, is rejected because
+// tsys.com was not supplied. That is a false negative and it is the
+// correct direction to err.
+func NetblockRegisteredToScopedDomain(ctx context.Context, session et.Session, ipnet *dbt.Entity) bool {
+	if ipnet == nil {
+		return false
+	}
+
+	edges, err := session.DB().OutgoingEdges(ctx, ipnet, time.Time{}, registrationContactRels...)
+	if err != nil || len(edges) == 0 {
+		return false
+	}
+
+	for _, edge := range edges {
+		contact, err := session.DB().FindEntityById(ctx, edge.ToEntity.ID)
+		if err != nil || contact == nil {
+			continue
+		}
+
+		ids, err := session.DB().OutgoingEdges(ctx, contact, time.Time{}, "id")
+		if err != nil {
+			continue
+		}
+
+		for _, ide := range ids {
+			ident, err := session.DB().FindEntityById(ctx, ide.ToEntity.ID)
+			if err != nil || ident == nil {
+				continue
+			}
+
+			id, ok := ident.Asset.(*oamgen.Identifier)
+			if !ok || id.Type != oamgen.EmailAddress {
+				continue
+			}
+
+			// An email address, not a bare domain: everything after the
+			// last '@'. Reject anything without exactly one usable
+			// domain part rather than guessing.
+			at := strings.LastIndex(id.ID, "@")
+			if at < 0 || at == len(id.ID)-1 {
+				continue
+			}
+
+			domain := strings.ToLower(strings.TrimSpace(id.ID[at+1:]))
+			if domain == "" {
+				continue
+			}
+
+			// IsDomainInScope performs an exact registered-domain suffix
+			// match against the configured seed list. A contact at
+			// mail.corp.example.com matches a seed of example.com; a
+			// contact at notexample.com does not.
+			if session.Config().IsDomainInScope(domain) {
+				return true
+			}
+		}
+	}
+	return false
+}
