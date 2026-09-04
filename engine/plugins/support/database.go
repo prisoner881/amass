@@ -547,11 +547,12 @@ func pruneTagsNotIn(ctx context.Context, session et.Session, ent *dbt.Entity, na
 // are the two the registries treat as authoritative for the assignee.
 var registrationContactRels = []string{"abuse_contact", "admin_contact"}
 
-// NetblockRegisteredToScopedDomain reports whether an IPNetRecord's
-// registration contacts prove the netblock is assigned to an organization
-// already in scope, by walking:
+// NetblockRegisteredToScopedDomain reports whether a Netblock's RDAP
+// registration contacts prove it is assigned to an organization already
+// in scope, by walking:
 //
-//	IPNetRecord -abuse_contact|admin_contact-> ContactRecord -id-> Identifier
+//	Netblock -registration-> IPNetRecord
+//	        -abuse_contact|admin_contact-> ContactRecord -id-> Identifier
 //
 // and testing the email address's domain against the session's configured
 // domains with Config().IsDomainInScope - an exact suffix match on a
@@ -589,13 +590,39 @@ var registrationContactRels = []string{"abuse_contact", "admin_contact"}
 // registered to tsys.com, a subsidiary of the target, is rejected because
 // tsys.com was not supplied. That is a false negative and it is the
 // correct direction to err.
-func NetblockRegisteredToScopedDomain(ctx context.Context, session et.Session, ipnet *dbt.Entity) bool {
-	if ipnet == nil {
+func NetblockRegisteredToScopedDomain(ctx context.Context, session et.Session, netblock *dbt.Entity) bool {
+	if netblock == nil {
 		return false
 	}
 
-	edges, err := session.DB().OutgoingEdges(ctx, ipnet, time.Time{}, registrationContactRels...)
-	if err != nil || len(edges) == 0 {
+	// Netblock -registration-> IPNetRecord -abuse_contact|admin_contact-> ContactRecord
+	//
+	// Reading the registration record from the DATABASE rather than from
+	// a dispatched event is the whole point of this entry point. RDAP
+	// only dispatches an IPNetRecord event on the run that first fetches
+	// it; on every later run netblock.lookup() returns nil and nothing
+	// downstream ever fires. So any check that waits for an IPNetRecord
+	// or ContactRecord event works exactly once and never again. Reading
+	// stored state works on every run after the first, which is the
+	// production configuration - a persistent database re-enumerated on
+	// a schedule.
+	regs, err := session.DB().OutgoingEdges(ctx, netblock, time.Time{}, "registration")
+	if err != nil || len(regs) == 0 {
+		return false
+	}
+
+	var edges []*dbt.Edge
+	for _, reg := range regs {
+		ipnet, err := session.DB().FindEntityById(ctx, reg.ToEntity.ID)
+		if err != nil || ipnet == nil {
+			continue
+		}
+		if found, err := session.DB().OutgoingEdges(ctx, ipnet,
+			time.Time{}, registrationContactRels...); err == nil {
+			edges = append(edges, found...)
+		}
+	}
+	if len(edges) == 0 {
 		return false
 	}
 
