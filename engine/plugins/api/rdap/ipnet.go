@@ -18,9 +18,22 @@ import (
 	"github.com/owasp-amass/open-asset-model/contact"
 	oamdns "github.com/owasp-amass/open-asset-model/dns"
 	"github.com/owasp-amass/open-asset-model/general"
+	"github.com/owasp-amass/open-asset-model/network"
 	oamreg "github.com/owasp-amass/open-asset-model/registration"
 	"github.com/owasp-amass/open-asset-model/url"
 )
+
+// maxAdmittedNetblockBits caps the size of a netblock admitted to scope
+// by registration contact, expressed as host bits: 11 permits a /21
+// (2,048 addresses) for IPv4 and rejects anything larger.
+//
+// Sized from measurement rather than taste. The largest client-owned
+// block observed carrying a matching registration contact was a /21, and
+// at the prefilter's sustained ~4 IPs/sec a /21 costs roughly nine
+// minutes - acceptable for one block. A /16 would cost over four hours.
+// The cap bounds the pathological case; a per-run budget would be the
+// next refinement if many qualifying blocks ever appear at once.
+const maxAdmittedNetblockBits = 11
 
 type ipnet struct {
 	name       string
@@ -54,7 +67,73 @@ func (r *ipnet) check(e *et.Event) error {
 	if len(findings) > 0 {
 		r.process(e, findings)
 	}
+
+	r.admitOwnedNetblock(e)
 	return nil
+}
+
+// admitOwnedNetblock registers this record's netblock with the session's
+// live scope tracker when its RDAP registration contacts prove the block
+// is assigned to a domain already in scope.
+//
+// This is the ONLY path by which a netblock containing no in-scope FQDN
+// can become in-scope, and it is deliberately narrow. ip_netblock.go
+// gates on support.HasInScopeFQDN, which requires an IP to have a
+// hostname that resolves to it. IPs found by neighbourhood sweep have no
+// hostname at all, so they are discovered and then never scanned - the
+// forgotten-subnet case this tool most needs to catch.
+//
+// Placed here rather than in ip_netblock.go because of ordering.
+// ip_netblock.go runs at Position 4 on the IPAddress pipeline and creates
+// the Netblock entity; the RDAP record and its contacts do not exist
+// until the resulting Netblock event reaches rdap's own handler and, in
+// turn, dispatches this IPNetRecord event. This handler is the first
+// point at which the ownership evidence is complete.
+//
+// Failing to admit is always safe - the block simply stays unscanned, as
+// it does today. Admitting wrongly directs active scan traffic at a third
+// party, so every branch below bails rather than guesses.
+func (r *ipnet) admitOwnedNetblock(e *et.Event) {
+	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 20*time.Second)
+	defer cancel()
+
+	if !support.NetblockRegisteredToScopedDomain(ctx, e.Session, e.Entity) {
+		return
+	}
+
+	// The netblock is on the FROM side: Netblock -registration-> IPNetRecord.
+	edges, err := e.Session.DB().IncomingEdges(ctx, e.Entity, time.Time{}, "registration")
+	if err != nil {
+		return
+	}
+
+	for _, edge := range edges {
+		nbent, err := e.Session.DB().FindEntityById(ctx, edge.FromEntity.ID)
+		if err != nil || nbent == nil {
+			continue
+		}
+
+		nb, ok := nbent.Asset.(*network.Netblock)
+		if !ok {
+			continue
+		}
+
+		// A ceiling on how much address space one registration record can
+		// admit. Registry assignments are occasionally enormous, and a
+		// single /8 would add 16 million addresses to the scan queue -
+		// enough to make an enumeration never finish, whatever the
+		// ownership evidence says. Blocks larger than this are still
+		// recorded in the database; they are simply not scanned wholesale.
+		if ones, bits := nb.CIDR.Bits(), nb.CIDR.Addr().BitLen(); bits-ones > maxAdmittedNetblockBits {
+			e.Session.Log().Info("netblock ownership confirmed but too large to admit",
+				"netblock", nb.CIDR.String(), "plugin", r.plugin.name, "handler", r.name)
+			continue
+		}
+
+		e.Session.Scope().Add(nb)
+		e.Session.Log().Info("netblock admitted to scope by registration contact",
+			"netblock", nb.CIDR.String(), "plugin", r.plugin.name, "handler", r.name)
+	}
 }
 
 func (r *ipnet) lookup(e *et.Event, asset *dbt.Entity, m *config.Matches) []*support.Finding {
