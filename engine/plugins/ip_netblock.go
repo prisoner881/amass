@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/netip"
+	"sync"
 	"time"
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
@@ -22,10 +23,31 @@ import (
 	oamnet "github.com/owasp-amass/open-asset-model/network"
 )
 
+// maxAdmittedNetblockBits caps how much address space one registration
+// record may admit, expressed as host bits: 11 permits a /21 (2,048
+// addresses) for IPv4 and rejects anything larger.
+//
+// Sized from measurement. The largest client-owned block observed with a
+// matching registration contact was a /21, which at the pre-filter's
+// sustained ~4 IPs/sec costs roughly nine minutes. A /16 would cost over
+// four hours, and registry assignments are occasionally far larger than
+// that. Oversized blocks are still recorded in the database; they are
+// simply not scanned wholesale.
+const maxAdmittedNetblockBits = 11
+
 type ipNetblock struct {
 	name   string
 	log    *slog.Logger
 	source *et.Source
+	// owned caches the registration-ownership decision per netblock CIDR.
+	//
+	// This handler fires on EVERY IPAddress the pipeline touches - 7,192
+	// in one observed run - while the ownership question is per netblock,
+	// of which there were 455. Without the cache, every IP that fails the
+	// cheap HasInScopeFQDN test would repeat a multi-hop graph walk, and
+	// the IPs that fail that test are the majority. Bounded by the number
+	// of distinct netblocks, so it cannot grow without limit.
+	owned sync.Map
 }
 
 func NewIPNetblock() et.Plugin {
@@ -112,6 +134,35 @@ func (d *ipNetblock) lookup(e *et.Event) error {
 	return nil
 }
 
+// netblockOwnedByTarget answers, once per netblock, whether the RDAP
+// registration contacts prove this block is assigned to a domain already
+// in scope - and whether it is small enough to admit.
+//
+// Failing to admit is always safe: the block stays unscanned, exactly as
+// it does today. Admitting wrongly points active scan traffic at somebody
+// else's network, so every branch bails rather than guesses.
+func (d *ipNetblock) netblockOwnedByTarget(ctx context.Context, e *et.Event,
+	nb *dbt.Entity, netblock *oamnet.Netblock) bool {
+	key := netblock.CIDR.String()
+	if v, ok := d.owned.Load(key); ok {
+		return v.(bool)
+	}
+
+	admit := support.NetblockRegisteredToScopedDomain(ctx, e.Session, nb)
+	if admit {
+		if ones, bits := netblock.CIDR.Bits(), netblock.CIDR.Addr().BitLen(); bits-ones > maxAdmittedNetblockBits {
+			d.log.Info("netblock ownership confirmed but too large to admit",
+				"netblock", key, "host_bits", bits-ones, "limit", maxAdmittedNetblockBits)
+			admit = false
+		} else {
+			d.log.Info("netblock admitted to scope by registration contact", "netblock", key)
+		}
+	}
+
+	d.owned.Store(key, admit)
+	return admit
+}
+
 func (d *ipNetblock) store(e *et.Event, entry *sessions.CIDRangerEntry) (*dbt.Entity, *dbt.Entity) {
 	netblock := &oamnet.Netblock{
 		Type: "IPv4",
@@ -147,7 +198,26 @@ func (d *ipNetblock) store(e *et.Event, entry *sessions.CIDRangerEntry) (*dbt.En
 	// entirely unrelated third-party infrastructure, all ending up
 	// marked in-scope. See support.HasInScopeFQDN for the actual check,
 	// shared with whois/bgptools/netblock.go's identical situation.
+	// Two independent routes into scope.
+	//
+	// HasInScopeFQDN is the original, cheap test: some hostname that
+	// resolves to this IP is already in scope. It covers the ordinary
+	// case and short-circuits before the second test runs.
+	//
+	// The registration check covers what that test structurally cannot.
+	// An IP discovered by neighbourhood sweep (support.IPAddressSweep)
+	// has no hostname of its own, so HasInScopeFQDN always rejects it and
+	// the pre-filter never scans it - measured at 3,563 discovered but
+	// entirely unassessed IP-only assets in a single enumeration, sitting
+	// inside blocks the target demonstrably owns. Those forgotten hosts
+	// are exactly what this tool exists to surface, and an attacker
+	// enumerating a netblock needs no hostname to reach them.
+	//
+	// The registration test is deliberately the second operand so the
+	// cheap path wins whenever it can.
 	if support.HasInScopeFQDN(ctx, e.Session, e.Entity) {
+		e.Session.Scope().Add(netblock)
+	} else if d.netblockOwnedByTarget(ctx, e, nb, netblock) {
 		e.Session.Scope().Add(netblock)
 	}
 
