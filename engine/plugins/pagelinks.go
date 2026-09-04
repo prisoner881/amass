@@ -128,10 +128,9 @@ func (pl *pageLinks) check(e *et.Event) error {
 
 // originURL reconstructs the page's own URL from the Service entity's
 // incoming PortRelation edge (same technique used by JARMFingerprint to
-// find what a Service is attached to) plus an outgoing "certificate"
-// edge to distinguish http from https, since Service itself doesn't
-// store a scheme. Needed to resolve relative links (href="/about")
-// into absolute hostnames.
+// find what a Service is attached to). Needed to resolve relative links
+// (href="/about") into absolute hostnames, and to key the File entity
+// that carries page-link provenance.
 func (pl *pageLinks) originURL(e *et.Event, since time.Time) (*url.URL, *dbt.Entity) {
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 15*time.Second)
 	defer cancel()
@@ -165,9 +164,46 @@ func (pl *pageLinks) originURL(e *et.Event, since time.Time) (*url.URL, *dbt.Ent
 		return nil, nil
 	}
 
-	scheme := "http"
-	if edges, err := e.Session.DB().OutgoingEdges(ctx, e.Entity, since, "certificate"); err == nil && len(edges) > 0 {
-		scheme = "https"
+	// Derive the scheme from the port, EXACTLY as http_probes does in
+	// both ipaddr_endpoint.probeOnePort and fqdn_endpoint.probeOnePort:
+	//
+	//	proto := "https"
+	//	if port == 80 || port == 8080 { proto = "http" }
+	//
+	// Matching that rule is correct by construction rather than by
+	// approximation. This plugin parses serv.Output - the response body
+	// http_probes already fetched - so the URL reconstructed here must
+	// describe the request that actually retrieved that body, not an
+	// independent guess about what the service is. If http_probes
+	// probed a port as https and failed, no Service and no Output
+	// exist, and this code never runs for it.
+	//
+	// This previously inferred the scheme from the presence of an
+	// outgoing "certificate" edge, which disagreed with http_probes in
+	// two directions and produced URLs that were flatly wrong:
+	//
+	//   - Port 80 WITH a certificate edge yielded "https://host:80".
+	//     A port-80 probe that follows a redirect to 443 gets resp.TLS
+	//     populated, so a certificate legitimately attaches to the
+	//     port-80 Service. The page was still fetched over http.
+	//   - Port 443 with no certificate edge yet yielded
+	//     "http://host:443", because the certificate simply had not
+	//     been stored at the moment this ran.
+	//
+	// The consequences were not cosmetic. File.Key() is the URL string,
+	// so "https://host" and "https://host:80" are two entities for one
+	// page: measured at 200 File entities collapsing to 148 once
+	// normalised, a 26% duplication rate that grows with every run on a
+	// persistent database. It also splits the provenance chain, so a
+	// query asking what crawling a host found could land on one File
+	// and miss links recorded against the other.
+	//
+	// The port-suffix logic below was always correct; it only emitted
+	// odd ":80" and ":443" suffixes because the scheme handed to it was
+	// wrong.
+	scheme := "https"
+	if port == 80 || port == 8080 {
+		scheme = "http"
 	}
 
 	raw := scheme + "://" + host
