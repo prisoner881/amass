@@ -238,13 +238,36 @@ func FindOrCreateService(e *et.Event, parent *dbt.Entity, addr string, port int,
 // deterministic unique_id, without creating or modifying anything.
 // Returns (nil, nil) - not an error - when none exists yet, the
 // expected, normal case for a genuinely new host:port.
+//
+// The combined `err != nil || len(found) == 0` test is load-bearing, and
+// separating the two conditions was a real defect that silently disabled
+// this entire plugin.
+//
+// asset-db does not signal "no match" with an empty slice. Both its
+// postgres and sqlite3 backends return errors.New("zero entities found")
+// - a plain error value with no exported sentinel to compare against. So
+// a miss is indistinguishable from a genuine failure by the error alone,
+// and an earlier version of this function returned that error to the
+// caller. FindOrCreateService then aborted before reaching the branch
+// that CREATES the Service, meaning every genuinely new non-HTTP service
+// was rejected at the exact moment it was about to be created.
+//
+// The effect was total and silent: across five client enumerations this
+// plugin produced zero Service entities, and 1,391 "failed to store the
+// Service asset" warnings in a single day once logging was working. The
+// only artifacts that ever survived were a handful of certificate edges
+// on ports where http_probes had already created the Service, so the
+// lookup succeeded and this path was never taken.
+//
+// Every other FindEntitiesByContent caller in this codebase - upstream
+// and fork alike - uses the combined test for exactly this reason. See
+// support/org/find.go and support/org/rdap.go for the same idiom. Do not
+// split it apart again; a real database failure will surface on the
+// CreateAsset call that follows, which is the correct place for it.
 func findExistingServiceByUniqueID(ctx context.Context, e *et.Event, uniqueID string) (*dbt.Entity, error) {
 	found, err := e.Session.DB().FindEntitiesByContent(ctx, oam.Service, time.Time{}, 1,
 		dbt.ContentFilters{"unique_id": uniqueID})
-	if err != nil {
-		return nil, err
-	}
-	if len(found) == 0 {
+	if err != nil || len(found) == 0 {
 		return nil, nil
 	}
 	return found[0], nil
