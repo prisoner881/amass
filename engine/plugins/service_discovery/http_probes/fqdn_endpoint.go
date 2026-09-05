@@ -56,8 +56,19 @@ func (fe *fqdnEndpoint) check(e *et.Event) error {
 	if support.AssetMonitoredWithinTTL(e.Session, e.Entity, src, since) {
 		findings = append(findings, fe.lookup(e, e.Entity, since)...)
 	} else {
-		findings = append(findings, fe.query(e, e.Entity)...)
-		support.MarkAssetMonitored(e.Session, e.Entity, src)
+		f, probed := fe.query(e, e.Entity)
+		findings = append(findings, f...)
+
+		// Mark ONLY when there were ports to probe. See the identical
+		// reasoning in ipaddr_endpoint.check(): the mark suppresses
+		// re-examination for the full TTL, so recording it after
+		// probing nothing hides the asset for a day over work that
+		// never happened. "Had ports and found nothing" is a real
+		// result and is still marked; only "had nothing to try" is
+		// left eligible for another pass.
+		if probed {
+			support.MarkAssetMonitored(e.Session, e.Entity, src)
+		}
 	}
 
 	if len(findings) > 0 {
@@ -94,7 +105,14 @@ func (fe *fqdnEndpoint) lookup(e *et.Event, host *dbt.Entity, since time.Time) [
 	return findings
 }
 
-func (fe *fqdnEndpoint) query(e *et.Event, host *dbt.Entity) []*support.Finding {
+// query probes the ports found open on the IPs this FQDN resolves to.
+//
+// The second return value reports whether there were any ports to probe.
+// It is deliberately NOT derivable from the findings slice: an empty
+// slice means either "nothing was listening" or "there was nothing to
+// try", and only the latter should leave the asset eligible for
+// re-examination. See ipaddr_endpoint.check() for the full reasoning.
+func (fe *fqdnEndpoint) query(e *et.Event, host *dbt.Entity) ([]*support.Finding, bool) {
 	var findings []*support.Finding
 
 	// Ports now come from support.OpenPortsForFQDN, which resolves
@@ -119,6 +137,14 @@ func (fe *fqdnEndpoint) query(e *et.Event, host *dbt.Entity) []*support.Finding 
 	// support.OpenPortsForFQDN's own doc comment for the full
 	// reasoning this originated from.
 	ports := support.OpenPortsForFQDN(e, host, nil)
+	if len(ports) == 0 {
+		// Nothing to probe. Reported as "not probed" so the caller
+		// leaves this asset eligible rather than suppressing it for
+		// the TTL over work that never happened. This is the common
+		// case for a name whose IPs have not yet been through
+		// port_prefilter at Position 41.
+		return nil, false
+	}
 
 	// Most-likely-to-be-open ports first (nmap's own real, published
 	// frequency data) - see protocol_probes' identical use of this,
@@ -147,11 +173,11 @@ func (fe *fqdnEndpoint) query(e *et.Event, host *dbt.Entity) []*support.Finding 
 				findings = append(findings, results...)
 			}
 		case <-timeout:
-			return findings
+			return findings, true
 		}
 	}
 
-	return findings
+	return findings, true
 }
 
 func (fe *fqdnEndpoint) probeOnePort(e *et.Event, host *dbt.Entity, port int, ch chan []*support.Finding) {
