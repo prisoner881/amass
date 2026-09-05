@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
 	et "github.com/owasp-amass/amass/v5/engine/types"
@@ -45,14 +46,29 @@ const PeekTimeout = 2 * time.Second
 
 // ambiguousBannerDBs are the Recog fingerprint databases tried, in
 // order, for a banner that arrived but wasn't unambiguously classified
-// as SSH. This is the mechanism that resolves genuine ambiguity (SMTP
-// and FTP both commonly opening with the same "220 " prefix) rather
-// than guessing at the classification layer.
+// as SSH. These names are filenames in recog-go's embedded Recog XML
+// set (loaded by LoadFingerprints) - they are not files in this repo.
+// Adding a database here is what "adds" imap_banners.xml; the XML is
+// already inside the module.
+//
+// Order matters for the 220-prefix collision (SMTP vs FTP). IMAP/NNTP
+// greetings don't share that prefix, so they sit after POP.
 var ambiguousBannerDBs = []string{
 	"smtp_banners.xml",
 	"ftp_banners.xml",
 	"pop_banners.xml",
+	"imap_banners.xml",
+	"nntp_banners.xml",
 	"telnet_banners.xml",
+}
+
+var sshBannerDBs = []string{"ssh_banners.xml"}
+
+func allRecogDBs() []string {
+	out := make([]string, 0, 1+len(ambiguousBannerDBs))
+	out = append(out, sshBannerDBs...)
+	out = append(out, ambiguousBannerDBs...)
+	return out
 }
 
 // selectDialer is the single, deliberately isolated place that decides
@@ -124,8 +140,31 @@ func (pp *protocolProbes) Start(r et.Registry) error {
 		return err
 	}
 
+	pp.logRecogLoad()
 	pp.log.Info("Plugin started")
 	return nil
+}
+
+func (pp *protocolProbes) logRecogLoad() {
+	fset, err := loadRecog()
+	if err != nil {
+		pp.log.Error("Recog fingerprints failed to load; banner identification will be skipped",
+			"error", err.Error())
+		return
+	}
+	n := recogDBCount(fset)
+	if n == 0 {
+		pp.log.Error("Recog fingerprints loaded empty; banner identification will be skipped")
+		return
+	}
+	missing := recogMissing(fset, allRecogDBs())
+	pp.log.Info("Recog fingerprints loaded",
+		"embedded_keys", n,
+		"requested_dbs", allRecogDBs())
+	if len(missing) > 0 {
+		pp.log.Error("Recog databases requested by this plugin are not in the embedded set",
+			"missing", missing)
+	}
 }
 
 func (pp *protocolProbes) Stop() {
@@ -271,7 +310,7 @@ func (pp *protocolProbes) probeOnePort(e *et.Event, dial amassnet.DialContext, a
 // certificate in the common case (see the earlier design discussion
 // for why this genuinely differs from every other protocol here).
 func (pp *protocolProbes) handleSSH(e *et.Event, addr string, port int, banner string) {
-	pp.storeServiceAndIdentify(e, addr, port, "ssh", banner, []string{"ssh_banners.xml"})
+	pp.storeServiceAndIdentify(e, addr, port, "ssh", banner, sshBannerDBs)
 }
 
 // handleAmbiguousBanner stores the Service entity for a banner-first
@@ -300,7 +339,7 @@ func (pp *protocolProbes) storeServiceAndIdentify(e *et.Event, addr string, port
 	// version string, by protocol specification), so a raw binary
 	// banner can fail to store entirely otherwise. Deliberately scoped
 	// to only the value handed to FindOrCreateService - banner itself,
-	// used below for MatchAnyBanner, stays completely untouched, since
+	// used below for IdentifyBanner, stays completely untouched, since
 	// Recog's fingerprint patterns may depend on exact byte structure
 	// and offsets that this stripping would otherwise disturb for the
 	// sake of a storage-only concern.
@@ -312,9 +351,68 @@ func (pp *protocolProbes) storeServiceAndIdentify(e *et.Event, addr string, port
 		return
 	}
 
-	match, ok := MatchAnyBanner(banner, dbNames...)
-	if !ok {
+	res := IdentifyBanner(banner, dbNames...)
+	pp.logIdentifyResult(addr, port, banner, dbNames, res)
+	if !res.Matched {
 		return
 	}
-	storeRecogMatch(e, svcEntity, pp.source, match)
+	if res.Product == "" && res.OSProduct == "" {
+		return
+	}
+	storeRecogMatch(e, svcEntity, pp.source, res.RecogMatch)
+}
+
+func (pp *protocolProbes) logIdentifyResult(addr string, port int, banner string, dbNames []string, res RecogResult) {
+	fields := []any{
+		"addr", addr,
+		"port", port,
+		"dbs", dbNames,
+		"banner", bannerForLog(banner, 80),
+		"candidates", res.Candidates,
+	}
+
+	if res.LoadError != nil {
+		pp.log.Error("Recog failed to load; skipping identification",
+			append(fields, "error", res.LoadError.Error())...)
+		return
+	}
+	if len(res.MissingDBs) > 0 {
+		pp.log.Error("Recog database missing from embedded set",
+			append(fields, "missing", res.MissingDBs)...)
+	}
+	if !res.Matched {
+		pp.log.Info("Recog no match", fields...)
+		return
+	}
+	if res.Product == "" && res.OSProduct == "" {
+		pp.log.Info("Recog matched but produced no product fields",
+			append(fields,
+				"database", res.Database,
+				"input", bannerForLog(res.Input, 80),
+				"vendor", res.Vendor)...)
+		return
+	}
+	pp.log.Info("Recog match",
+		append(fields,
+			"database", res.Database,
+			"input", bannerForLog(res.Input, 80),
+			"vendor", res.Vendor,
+			"product", res.Product,
+			"version", res.Version,
+			"os_vendor", res.OSVendor,
+			"os_product", res.OSProduct,
+			"os_version", res.OSVersion)...)
+}
+
+func bannerForLog(s string, n int) string {
+	s = strings.ReplaceAll(s, "\r", "\\r")
+	s = strings.ReplaceAll(s, "\n", "\\n")
+	s = strings.ReplaceAll(s, "\x00", "\\x00")
+	if !utf8.ValidString(s) {
+		s = strings.ToValidUTF8(s, "\uFFFD")
+	}
+	if len(s) > n {
+		return s[:n] + "..."
+	}
+	return s
 }
