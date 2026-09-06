@@ -184,6 +184,24 @@ func (c *Client) RequestEndWork(ctx context.Context, token uuid.UUID) error {
 	return nil
 }
 
+func (c *Client) EndWorkDone(ctx context.Context, token uuid.UUID) (bool, error) {
+	resp, err := amasshttp.RequestWebPage(ctx, c.httpClient,
+		&amasshttp.Request{URL: c.base + "/sessions/" + token.String() + "/end-work"})
+	if err != nil {
+		return false, err
+	}
+	if resp.StatusCode != http.StatusOK {
+		return false, fmt.Errorf("endWorkDone: status=%s", resp.Status)
+	}
+	var body struct {
+		Done bool `json:"done"`
+	}
+	if err := json.NewDecoder(strings.NewReader(resp.Body)).Decode(&body); err != nil {
+		return false, err
+	}
+	return body.Done, nil
+}
+
 // Retrieves statistics for the session associated with the provided token.
 func (c *Client) SessionStats(ctx context.Context, token uuid.UUID) (*et.SessionStats, error) {
 	resp, err := amasshttp.RequestWebPage(ctx, c.httpClient,
