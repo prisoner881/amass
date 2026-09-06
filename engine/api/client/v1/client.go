@@ -164,6 +164,26 @@ func (c *Client) TerminateSession(ctx context.Context, token uuid.UUID) error {
 	return nil
 }
 
+// RequestEndWork asks the engine to run session-end fill/sweep while
+// the session stays alive so /stats keeps working.
+func (c *Client) RequestEndWork(ctx context.Context, token uuid.UUID) error {
+	resp, err := amasshttp.RequestWebPage(ctx, c.httpClient, &amasshttp.Request{
+		Method: http.MethodPost,
+		URL:    c.base + "/sessions/" + token.String() + "/end-work",
+	})
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode != http.StatusAccepted && resp.StatusCode != http.StatusNoContent {
+		msg, err := readJSONError(resp.Body)
+		if err != nil {
+			return fmt.Errorf("requestEndWork: status=%s", resp.Status)
+		}
+		return fmt.Errorf("requestEndWork: status=%s error=%s", resp.Status, msg)
+	}
+	return nil
+}
+
 // Retrieves statistics for the session associated with the provided token.
 func (c *Client) SessionStats(ctx context.Context, token uuid.UUID) (*et.SessionStats, error) {
 	resp, err := amasshttp.RequestWebPage(ctx, c.httpClient,
