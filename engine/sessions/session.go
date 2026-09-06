@@ -51,8 +51,9 @@ type Session struct {
 	stats        *et.SessionStats
 	done         chan struct{}
 	finished     bool
-	numOfSess    int
-	netSemaphore *sessSemaphore
+	numOfSess     int
+	netSemaphore  *sessSemaphore
+	scanSemaphore *sessSemaphore
 }
 
 // CreateSession initializes a new Session object based on the provided configuration.
@@ -85,7 +86,8 @@ func CreateSession(mgr *manager, reg et.Registry, cfg *config.Config) (et.Sessio
 		stats:        new(et.SessionStats),
 		done:         make(chan struct{}),
 		numOfSess:    numOfSessions,
-		netSemaphore: NewSessSemaphore(amassnet.MaxNetworkConns / numOfSessions),
+		netSemaphore:  NewSessSemaphore(amassnet.MaxNetworkConns / numOfSessions),
+		scanSemaphore: NewSessSemaphore(amassnet.MaxScanConns),
 	}
 	s.scope = scope.CreateFromConfigScope(s)
 	s.log = slog.New(slog.NewJSONHandler(s.ps, nil)).With("session", s.id)
@@ -140,6 +142,10 @@ func (s *Session) PubSub() *pubsub.Logger {
 
 func (s *Session) NetSem() et.SessionSemaphone {
 	return s.netSemaphore
+}
+
+func (s *Session) ScanSem() et.SessionSemaphone {
+	return s.scanSemaphore
 }
 
 func (s *Session) Config() *config.Config {
