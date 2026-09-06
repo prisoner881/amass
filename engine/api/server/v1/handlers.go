@@ -196,6 +196,23 @@ func (v *V1Handlers) TerminateSessionHandler(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// EndWorkHandler starts session-end work (owned-netblock fill +
+// Protocol-Probes sweep) without killing the session. Returns 202.
+func (v *V1Handlers) EndWorkHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	token, err := uuid.Parse(vars["session_token"])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid session token", err)
+		return
+	}
+	if v.mgr.GetSession(token) == nil {
+		writeError(w, http.StatusNotFound, "session not found", ErrNotFound)
+		return
+	}
+	go v.mgr.RunEndWork(token)
+	w.WriteHeader(http.StatusAccepted)
+}
+
 // GetStatsHandler godoc
 //
 // @Summary      Get session statistics
