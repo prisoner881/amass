@@ -213,6 +213,31 @@ func (v *V1Handlers) EndWorkHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+func (v *V1Handlers) EndWorkStatusHandler(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	token, err := uuid.Parse(vars["session_token"])
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid session token", err)
+		return
+	}
+	sess := v.mgr.GetSession(token)
+	if sess == nil {
+		writeError(w, http.StatusNotFound, "session not found", ErrNotFound)
+		return
+	}
+	p := support.SnapshotEndWork(token)
+	p.Done = v.mgr.EndWorkDone(token)
+	if sess.Backlog() != nil {
+		q, l, doneCnt, err := sess.Backlog().Counts(oam.IPAddress)
+		if err == nil {
+			p.Waiting = int(q)
+			p.Leased = int(l)
+			p.Processed = int(doneCnt)
+		}
+	}
+	writeJSON(w, http.StatusOK, p)
+}
+
 // GetStatsHandler godoc
 //
 // @Summary      Get session statistics
