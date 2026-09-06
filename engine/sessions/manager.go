@@ -31,6 +31,7 @@ type manager struct {
 	sessions     map[uuid.UUID]et.Session
 	shutdownHook func(et.Session)
 	endWork      sync.Map
+	endWorkDone  sync.Map
 }
 
 // NewManager: creates a new session storage.
@@ -123,6 +124,12 @@ func (r *manager) RunEndWork(id uuid.UUID) {
 	hook := r.shutdownHook
 	r.RUnlock()
 	r.runHookOnce(id, s, hook)
+	r.endWorkDone.Store(id, true)
+}
+
+func (r *manager) EndWorkDone(id uuid.UUID) bool {
+	v, ok := r.endWorkDone.Load(id)
+	return ok && v.(bool)
 }
 
 func (r *manager) runHookOnce(id uuid.UUID, s et.Session, hook func(et.Session)) {
