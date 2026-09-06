@@ -155,6 +155,11 @@ type SessionManager interface {
 	NewSession(cfg *config.Config) (Session, error)
 	AddSession(s Session) error
 	CancelSession(id uuid.UUID)
+	// RunEndWork runs the shutdown hook without Kill() so first-pass
+	// idle can trigger owned-netblock fill and the Protocol-Probes
+	// sweep while stats still work. CancelSession still runs the hook
+	// again (idempotent) before tearing the session down.
+	RunEndWork(id uuid.UUID)
 	GetSession(id uuid.UUID) Session
 	GetSessions() []Session
 	// SetShutdownHook registers a callback invoked at the start of
