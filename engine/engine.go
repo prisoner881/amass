@@ -17,6 +17,7 @@ import (
 	"github.com/owasp-amass/amass/v5/engine/dispatcher"
 	"github.com/owasp-amass/amass/v5/engine/plugins"
 	"github.com/owasp-amass/amass/v5/engine/plugins/service_discovery/protocol_probes"
+	"github.com/owasp-amass/amass/v5/engine/plugins/support"
 	"github.com/owasp-amass/amass/v5/engine/registry"
 	"github.com/owasp-amass/amass/v5/engine/sessions"
 	et "github.com/owasp-amass/amass/v5/engine/types"
@@ -51,6 +52,7 @@ func NewEngine(l *slog.Logger) (*Engine, error) {
 	}
 
 	mgr.SetShutdownHook(func(s et.Session) {
+		support.FinishOwnedNetblockFills(s, dis)
 		protocol_probes.SweepMissedIPs(s, dis)
 	})
 
@@ -94,6 +96,7 @@ func (e *Engine) Shutdown() {
 	// CancelSession (TerminateSession) also runs the hook; a second
 	// pass is a no-op once Protocol-Probes has marked the misses.
 	for _, s := range e.Manager.GetSessions() {
+		support.FinishOwnedNetblockFills(s, e.Dispatcher)
 		protocol_probes.SweepMissedIPs(s, e.Dispatcher)
 	}
 	e.Dispatcher.Shutdown()
