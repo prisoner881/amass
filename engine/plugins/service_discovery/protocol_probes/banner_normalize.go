@@ -8,9 +8,9 @@ import "strings"
 
 // greetingPrefixes are on-the-wire status tokens Recog fingerprints do
 // not include. Recog's examples are the *field* after the protocol
-// greeting: "Dovecot ready." not "+OK Dovecot ready.\r\n". SSH is the
-// exception — those patterns start with "^SSH-" — so SSH banners are
-// left intact by stripGreeting (none of these prefixes match them).
+// greeting: "Dovecot ready." not "+OK Dovecot ready.\r\n". SSH uses a
+// different split (RFC 4253 proto token vs software field) and is
+// handled by stripSSHPrefix, not this list.
 var greetingPrefixes = []string{
 	"+OK ",
 	"+OK",
@@ -34,10 +34,12 @@ var greetingPrefixes = []string{
 // them; imap_banners.xml even documents that "* OK " is expected to
 // have been removed before matching).
 //
-// Order is load-bearing. The full trimmed banner is first so SSH (and
-// anything whose fingerprints include the protocol token) still
-// matches. Greeting-stripped forms come next so Dovecot/Postfix/etc.
-// can match. First and last lines cover multiline FTP (220- … 220).
+// Order is load-bearing. The full trimmed banner is first so a
+// fingerprint that includes the protocol token (rare; one FTP
+// pattern starts with `^220 `) can still match. Greeting-stripped
+// and SSH-prefix-stripped forms come next so Recog's usual
+// field-only patterns match. First and last lines cover multiline
+// FTP (220- … 220).
 func BannerCandidates(raw string) []string {
 	s := strings.ReplaceAll(raw, "\r\n", "\n")
 	s = strings.ReplaceAll(s, "\r", "\n")
@@ -61,6 +63,7 @@ func BannerCandidates(raw string) []string {
 	}
 
 	add(s)
+	add(stripSSHPrefix(s))
 	stripped := stripGreeting(s)
 	add(stripped)
 	// IMAP Recog patterns accept either "Dovecot ready." or
@@ -69,6 +72,7 @@ func BannerCandidates(raw string) []string {
 
 	lines := strings.Split(s, "\n")
 	add(lines[0])
+	add(stripSSHPrefix(lines[0]))
 	add(stripGreeting(lines[0]))
 	add(stripIMAPCapability(stripGreeting(lines[0])))
 	if n := len(lines); n > 1 {
@@ -112,4 +116,17 @@ func stripIMAPCapability(s string) string {
 		return s
 	}
 	return strings.TrimSpace(s[end+1:])
+}
+
+// stripSSHPrefix removes the RFC 4253 protocol token. Recog ssh_banners.xml
+// fingerprints the software field only (`OpenSSH_7.4`, `dropbear_2022.83`),
+// never the on-the-wire `SSH-2.0-…` identification string.
+func stripSSHPrefix(s string) string {
+	s = strings.TrimSpace(s)
+	for _, p := range []string{"SSH-2.0-", "SSH-1.99-", "SSH-1.5-", "SSH-1.0-"} {
+		if strings.HasPrefix(s, p) {
+			return strings.TrimSpace(s[len(p):])
+		}
+	}
+	return s
 }

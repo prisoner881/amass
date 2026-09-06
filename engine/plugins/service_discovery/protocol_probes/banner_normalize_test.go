@@ -8,12 +8,17 @@ import (
 func TestBannerCandidates_OpenSSH(t *testing.T) {
 	got := BannerCandidates("SSH-2.0-OpenSSH_9.6\r\n")
 	if !slices.Contains(got, "SSH-2.0-OpenSSH_9.6") {
-		t.Fatalf("expected trimmed SSH banner, got %#v", got)
+		t.Fatalf("expected trimmed wire banner first, got %#v", got)
 	}
-	for _, c := range got {
-		if len(c) < 4 || c[:4] != "SSH-" {
-			t.Errorf("SSH candidate lost SSH- prefix: %q", c)
-		}
+	if !slices.Contains(got, "OpenSSH_9.6") {
+		t.Fatalf("expected Recog software field OpenSSH_9.6, got %#v", got)
+	}
+}
+
+func TestBannerCandidates_OpenSSH74(t *testing.T) {
+	got := BannerCandidates("SSH-2.0-OpenSSH_7.4\r")
+	if !slices.Contains(got, "OpenSSH_7.4") {
+		t.Fatalf("expected OpenSSH_7.4, got %#v", got)
 	}
 }
 

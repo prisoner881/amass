@@ -70,6 +70,26 @@ func TestIdentifyBanner_MissingDB(t *testing.T) {
 	}
 }
 
+func TestIdentifyBanner_OpenSSH74(t *testing.T) {
+	res := IdentifyBanner("SSH-2.0-OpenSSH_7.4\r", "ssh_banners.xml")
+	if res.LoadError != nil {
+		t.Fatalf("LoadFingerprints failed: %v", res.LoadError)
+	}
+	if len(res.MissingDBs) > 0 {
+		t.Fatalf("ssh_banners.xml missing from embed: %v", res.MissingDBs)
+	}
+	if !res.Matched {
+		t.Fatalf("expected OpenSSH 7.4 match, candidates=%v", res.Candidates)
+	}
+	if !strings.Contains(strings.ToLower(res.Product), "openssh") {
+		t.Fatalf("product=%q vendor=%q version=%q input=%q",
+			res.Product, res.Vendor, res.Version, res.Input)
+	}
+	if res.Input != "OpenSSH_7.4" {
+		t.Fatalf("matched input=%q, want OpenSSH_7.4 (software field)", res.Input)
+	}
+}
+
 func TestIdentifyBanner_CompleteFTPNoFingerprint(t *testing.T) {
 	res := IdentifyBanner("SSH-2.0-CompleteFTP_22.1.1\r", "ssh_banners.xml")
 	if res.LoadError != nil {
