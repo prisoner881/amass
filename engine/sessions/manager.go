@@ -30,6 +30,7 @@ type manager struct {
 	registry     et.Registry
 	sessions     map[uuid.UUID]et.Session
 	shutdownHook func(et.Session)
+	endWork      sync.Map
 }
 
 // NewManager: creates a new session storage.
@@ -85,9 +86,7 @@ func (r *manager) CancelSession(id uuid.UUID) {
 	r.RLock()
 	hook := r.shutdownHook
 	r.RUnlock()
-	if hook != nil {
-		hook(s)
-	}
+	r.runHookOnce(id, s, hook)
 
 	s.Kill()
 
@@ -110,6 +109,28 @@ func (r *manager) CancelSession(id uuid.UUID) {
 		}
 	}
 	s.PubSub().Close()
+}
+
+// RunEndWork executes the session-end hook without destroying the
+// session. Enum uses this after first-pass idle so fill/sweep work
+// shows up in /stats; a later idle is the real completion signal.
+func (r *manager) RunEndWork(id uuid.UUID) {
+	s := r.GetSession(id)
+	if s == nil {
+		return
+	}
+	r.RLock()
+	hook := r.shutdownHook
+	r.RUnlock()
+	r.runHookOnce(id, s, hook)
+}
+
+func (r *manager) runHookOnce(id uuid.UUID, s et.Session, hook func(et.Session)) {
+	if hook == nil || s == nil {
+		return
+	}
+	once, _ := r.endWork.LoadOrStore(id, &sync.Once{})
+	once.(*sync.Once).Do(func() { hook(s) })
 }
 
 func (r *manager) GetSessions() []et.Session {
