@@ -562,6 +562,8 @@ type BacklogResponse struct {
 	Buckets           []BacklogBucket `json:"buckets"`
 	ActiveConnections int             `json:"active_connections"`
 	MaxConnections    int             `json:"max_connections"`
+	ActiveScanConns   int             `json:"active_scan_conns"`
+	MaxScanConns      int             `json:"max_scan_conns"`
 	PrefilterScanned  int64           `json:"prefilter_scanned"`
 	PrefilterOpen     int64           `json:"prefilter_open"`
 }
@@ -634,10 +636,17 @@ func (v *V1Handlers) GetBacklogHandler(w http.ResponseWriter, r *http.Request) {
 
 	scanned, open := support.PrefilterStats()
 
+	activeScan, maxScan := 0, 0
+	if ss := sess.ScanSem(); ss != nil {
+		activeScan, maxScan = ss.InUse(), ss.Cap()
+	}
+
 	writeJSON(w, http.StatusOK, BacklogResponse{
 		Buckets:           buckets,
 		ActiveConnections: sess.NetSem().InUse(),
 		MaxConnections:    sess.NetSem().Cap(),
+		ActiveScanConns:   activeScan,
+		MaxScanConns:      maxScan,
 		PrefilterScanned:  scanned,
 		PrefilterOpen:     open,
 	})
