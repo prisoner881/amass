@@ -264,3 +264,14 @@ func (sb *sessionBacklog) Counts(atype oam.AssetType) (queued, leased, done int6
 
 	return sb.db.Counts(ctx, atype)
 }
+
+func (sb *sessionBacklog) ListDone(atype oam.AssetType) ([]string, error) {
+	if sb == nil || sb.db == nil {
+		return nil, errors.New("backlog is nil")
+	}
+
+	ctx, cancel := context.WithTimeout(sb.session.Ctx(), 5*time.Second)
+	defer cancel()
+
+	return sb.db.ListDone(ctx, atype)
+}
