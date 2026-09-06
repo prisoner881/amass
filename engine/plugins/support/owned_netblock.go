@@ -166,6 +166,7 @@ func FinishOwnedNetblockFills(s et.Session, d et.Dispatcher) {
 		return
 	}
 	log := s.Log().WithGroup("plugin").With("name", OwnedNetblockSource.Name)
+	SetEndWorkPhase(s, "owned-fill")
 
 	for _, n := range s.Scope().Netblocks() {
 		if n == nil || !PrefixEligibleForFill(n.CIDR) {
