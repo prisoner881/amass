@@ -46,6 +46,7 @@ type Session interface {
 	Log() *slog.Logger
 	PubSub() *pubsub.Logger
 	NetSem() SessionSemaphone
+	ScanSem() SessionSemaphone
 	Config() *config.Config
 	Scope() Scope
 	StartTime() time.Time
