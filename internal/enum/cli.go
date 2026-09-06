@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"os/signal"
-	"strings"
 	"time"
 
 	"github.com/caffix/stringset"
@@ -189,11 +188,6 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 	}
 	defer func() {
 		_ = c.TerminateSession(context.Background(), token)
-		// TerminateSession returns as soon as the engine accepts the
-		// cancel. CancelSession then runs the Protocol-Probes sweep
-		// before Kill(); poll until the session disappears so this
-		// process outlives that pass.
-		waitSessionGone(c, token)
 	}()
 
 	logfile := args.Filepaths.LogFile
@@ -273,6 +267,8 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 	done := make(chan struct{}, 1)
 	go func() {
 		var previous, finished int
+		var endWork bool
+		var endWorkAt time.Time
 		timeoutDur := time.Duration(args.Timeout) * time.Minute
 
 		term := time.NewTimer(timeoutDur)
@@ -305,7 +301,17 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 
 					if stats.WorkItemsCompleted == stats.WorkItemsTotal {
 						finished++
-						if finished == 5 {
+						if finished == 5 && !endWork {
+							_, _ = afmt.R.Fprintf(color.Error, "First pass idle. Starting session-end work...\n")
+							ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+							if err := c.RequestEndWork(ctx, token); err != nil {
+								_, _ = afmt.R.Fprintf(color.Error, "Failed to start session-end work: %v\n", err)
+							}
+							cancel()
+							endWork = true
+							endWorkAt = time.Now()
+							finished = 0
+						} else if finished == 5 && endWork && time.Since(endWorkAt) >= 15*time.Second {
 							close(done)
 							return
 						}
@@ -338,26 +344,6 @@ func getStats(c *client.Client, token uuid.UUID) (*et.SessionStats, error) {
 	defer cancel()
 
 	return c.SessionStats(ctx, token)
-}
-
-func waitSessionGone(c *client.Client, token uuid.UUID) {
-	const (
-		poll    = 2 * time.Second
-		timeout = 20 * time.Minute
-	)
-	deadline := time.Now().Add(timeout)
-	_, _ = afmt.R.Fprintf(color.Error, "Waiting for engine session-end sweep to finish...\n")
-	for time.Now().Before(deadline) {
-		_, err := getStats(c, token)
-		if err != nil {
-			msg := strings.ToLower(err.Error())
-			if strings.Contains(msg, "404") || strings.Contains(msg, "not found") {
-				return
-			}
-		}
-		time.Sleep(poll)
-	}
-	_, _ = afmt.R.Fprintf(color.Error, "Timed out waiting for the session-end sweep (%s)\n", timeout)
 }
 
 func argsAndConfig(cmdName string, clArgs []string) (*config.Config, *Args) {
