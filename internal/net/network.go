@@ -18,6 +18,13 @@ import (
 // Maximum number of connections allowed by each process.
 const MaxNetworkConns = 500
 
+// MaxScanConns is the connect-scan budget (port_prefilter +
+// fqdn_endpoint EnsureOpenPortsScanned). Sized for
+// HighHandlerInstances (32) × maxConcurrentPortsPerIP (100) so a
+// full prefilter wave is not queued behind NetSem. Not divided
+// across sessions: one engine, one session.
+const MaxScanConns = 3200
+
 // IPv4RE is a regular expression that will match an IPv4 address.
 const IPv4RE = "((25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)[.]){3}(25[0-5]|2[0-4][0-9]|[01]?[0-9][0-9]?)"
 
