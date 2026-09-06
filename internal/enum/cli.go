@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"strings"
 	"time"
 
 	"github.com/caffix/stringset"
@@ -186,7 +187,14 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 		_, _ = afmt.R.Fprintf(color.Error, "Failed to create a session with the Amass engine: %v\n", err)
 		os.Exit(1)
 	}
-	defer func() { _ = c.TerminateSession(context.Background(), token) }()
+	defer func() {
+		_ = c.TerminateSession(context.Background(), token)
+		// TerminateSession returns as soon as the engine accepts the
+		// cancel. CancelSession then runs the Protocol-Probes sweep
+		// before Kill(); poll until the session disappears so this
+		// process outlives that pass.
+		waitSessionGone(c, token)
+	}()
 
 	logfile := args.Filepaths.LogFile
 	if logfile == "" {
@@ -330,6 +338,26 @@ func getStats(c *client.Client, token uuid.UUID) (*et.SessionStats, error) {
 	defer cancel()
 
 	return c.SessionStats(ctx, token)
+}
+
+func waitSessionGone(c *client.Client, token uuid.UUID) {
+	const (
+		poll    = 2 * time.Second
+		timeout = 20 * time.Minute
+	)
+	deadline := time.Now().Add(timeout)
+	_, _ = afmt.R.Fprintf(color.Error, "Waiting for engine session-end sweep to finish...\n")
+	for time.Now().Before(deadline) {
+		_, err := getStats(c, token)
+		if err != nil {
+			msg := strings.ToLower(err.Error())
+			if strings.Contains(msg, "404") || strings.Contains(msg, "not found") {
+				return
+			}
+		}
+		time.Sleep(poll)
+	}
+	_, _ = afmt.R.Fprintf(color.Error, "Timed out waiting for the session-end sweep (%s)\n", timeout)
 }
 
 func argsAndConfig(cmdName string, clArgs []string) (*config.Config, *Args) {
