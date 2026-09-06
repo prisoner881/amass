@@ -160,6 +160,7 @@ type SessionManager interface {
 	// sweep while stats still work. CancelSession still runs the hook
 	// again (idempotent) before tearing the session down.
 	RunEndWork(id uuid.UUID)
+	EndWorkDone(id uuid.UUID) bool
 	GetSession(id uuid.UUID) Session
 	GetSessions() []Session
 	// SetShutdownHook registers a callback invoked at the start of
