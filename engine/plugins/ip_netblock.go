@@ -150,6 +150,7 @@ func (d *ipNetblock) store(e *et.Event, entry *sessions.CIDRangerEntry) (*dbt.En
 	if support.HasInScopeFQDN(ctx, e.Session, e.Entity) {
 		e.Session.Scope().Add(netblock)
 	}
+	support.AdmitOwnedNetblock(e, nb)
 
 	_, _ = e.Session.DB().CreateEntityProperty(ctx, nb, &general.SourceProperty{
 		Source:     entry.Src.Name,
