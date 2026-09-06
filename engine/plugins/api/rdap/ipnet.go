@@ -19,6 +19,7 @@ import (
 	oamdns "github.com/owasp-amass/open-asset-model/dns"
 	"github.com/owasp-amass/open-asset-model/general"
 	oamreg "github.com/owasp-amass/open-asset-model/registration"
+	"github.com/owasp-amass/open-asset-model/network"
 	"github.com/owasp-amass/open-asset-model/url"
 )
 
@@ -185,6 +186,31 @@ func (r *ipnet) store(e *et.Event, resp *rdap.IPNetwork, entity *dbt.Entity, m *
 		for _, v := range resp.Entities {
 			r.plugin.storeEntity(e, 1, &v, entity, r.plugin.source, m)
 		}
+	}
+
+	r.admitParentNetblock(e, entity)
+}
+
+func (r *ipnet) admitParentNetblock(e *et.Event, ipnet *dbt.Entity) {
+	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 15*time.Second)
+	defer cancel()
+
+	edges, err := e.Session.DB().IncomingEdges(ctx, ipnet, time.Time{}, "registration")
+	if err != nil {
+		return
+	}
+	for _, edge := range edges {
+		if edge.FromEntity == nil {
+			continue
+		}
+		nb, err := e.Session.DB().FindEntityById(ctx, edge.FromEntity.ID)
+		if err != nil || nb == nil {
+			continue
+		}
+		if _, ok := nb.Asset.(*network.Netblock); !ok {
+			continue
+		}
+		support.AdmitOwnedNetblock(e, nb)
 	}
 }
 
