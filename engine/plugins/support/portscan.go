@@ -94,18 +94,9 @@ const PortPrefilterScanTimeout = 2 * time.Second
 // NetSem token). At 100, one batch covers the whole list, so the same
 // scan is ~2s and those slots return to HTTP probing between scans.
 //
-// Worth being explicit about the same, still-standing gap this
-// history exposed: unlike protocol_probes, scanPorts never acquires
-// NetSem at all - it only ever respects this constant's own, local,
-// per-call bound. This remains a deliberate exemption, not an
-// oversight, but it's the reason this constant alone is what
-// determines this stage's own worst-case instantaneous connection
-// count, and why raising it again warrants the same file-descriptor
-// math shown above, not just a throughput judgment call. Note also
-// that the 8,192 limit is a property of the deployment, not of this
-// code: this value and that ulimit have to move together, and a
-// deployment that does not set it inherits Docker's 1,024 default and
-// will reproduce the original failure exactly.
+// Worth being explicit: scanPorts acquires Session.ScanSem (cap
+// MaxScanConns=3200), not NetSem. NetSem stays the HTTP/API budget.
+// ScanSem is what the dashboard reports separately from NetSem.
 const maxConcurrentPortsPerIP = 100
 
 var scanGroup singleflight.Group
@@ -189,7 +180,7 @@ func EnsureOpenPortsScanned(e *et.Event, ent *dbt.Entity, dial amassnet.DialCont
 			return OpenPortsForIP(ctx, e.Session, ent, since), nil
 		}
 
-		open := scanPorts(ctx, dial, ip.Address.String(), ports)
+		open := scanPorts(ctx, dial, ip.Address.String(), ports, e.Session.ScanSem())
 		for _, port := range open {
 			// Deliberately not surfacing individual per-port storage
 			// errors to the caller - a single failed property write
@@ -278,7 +269,7 @@ func PrefilterStats() (scanned, open int64) {
 // to answer "is anything listening here," leaving what's actually
 // running to protocol_probes and http_probes further down the
 // pipeline.
-func scanPorts(ctx context.Context, dial amassnet.DialContext, addr string, ports []int) []int {
+func scanPorts(ctx context.Context, dial amassnet.DialContext, addr string, ports []int, scansem et.SessionSemaphone) []int {
 	if dial == nil {
 		dial = amassnet.NewDialContext(PortPrefilterScanTimeout)
 	}
@@ -299,7 +290,13 @@ func scanPorts(ctx context.Context, dial amassnet.DialContext, addr string, port
 			target := net.JoinHostPort(addr, strconv.Itoa(port))
 			prefilterScanned.Add(1)
 
+			if scansem != nil {
+				scansem.Acquire()
+			}
 			conn, err := dial(ctx, "tcp", target)
+			if scansem != nil {
+				scansem.Release()
+			}
 			if err != nil {
 				return
 			}
