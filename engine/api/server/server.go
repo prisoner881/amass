@@ -120,6 +120,7 @@ func (s *Server) routes(r *mux.Router) {
 	session := sessions.PathPrefix("/{session_token:" + uuidRE + "}").Subrouter()
 	session.HandleFunc("", s.apiV1.TerminateSessionHandler).Methods(http.MethodDelete)
 	session.HandleFunc("/end-work", s.apiV1.EndWorkHandler).Methods(http.MethodPost)
+	session.HandleFunc("/end-work", s.apiV1.EndWorkStatusHandler).Methods(http.MethodGet)
 	session.HandleFunc("/stats", s.apiV1.GetStatsHandler).Methods(http.MethodGet)
 	session.HandleFunc("/backlog", s.apiV1.GetBacklogHandler).Methods(http.MethodGet)
 
