@@ -26,6 +26,11 @@ type EmailMeta struct {
 
 type Dispatcher interface {
 	DispatchEvent(e *Event) error
+	// ResubmitEvent re-queues an entity that is already in this
+	// session's backlog (Has == true). DispatchEvent refuses those.
+	// The backlog row is forced back to Queued; the pump will claim
+	// it and the asset will traverse its pipeline again.
+	ResubmitEvent(e *Event) error
 	Shutdown()
 }
 

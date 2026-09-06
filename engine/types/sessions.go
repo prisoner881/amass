@@ -132,6 +132,11 @@ type Backlog interface {
 
 	Counts(atype oam.AssetType) (queued, leased, done int64, err error)
 
+	// ListDone returns entity IDs in this session's backlog that have
+	// completed a pipeline pass (state=done) for the given asset type.
+	// Used by session-end sweeps that must not touch in-flight work.
+	ListDone(atype oam.AssetType) ([]string, error)
+
 	Delete(e *dbt.Entity) error
 	Close() error
 
@@ -152,6 +157,10 @@ type SessionManager interface {
 	CancelSession(id uuid.UUID)
 	GetSession(id uuid.UUID) Session
 	GetSessions() []Session
+	// SetShutdownHook registers a callback invoked at the start of
+	// CancelSession, before Kill(), while the session context and
+	// dispatcher pump are still alive. One hook; last writer wins.
+	SetShutdownHook(fn func(Session))
 	Shutdown()
 }
 
