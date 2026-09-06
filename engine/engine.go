@@ -16,6 +16,7 @@ import (
 	"github.com/owasp-amass/amass/v5/engine/api/server"
 	"github.com/owasp-amass/amass/v5/engine/dispatcher"
 	"github.com/owasp-amass/amass/v5/engine/plugins"
+	"github.com/owasp-amass/amass/v5/engine/plugins/service_discovery/protocol_probes"
 	"github.com/owasp-amass/amass/v5/engine/registry"
 	"github.com/owasp-amass/amass/v5/engine/sessions"
 	et "github.com/owasp-amass/amass/v5/engine/types"
@@ -48,6 +49,10 @@ func NewEngine(l *slog.Logger) (*Engine, error) {
 	if err := plugins.LoadAndStartPlugins(reg); err != nil {
 		return nil, err
 	}
+
+	mgr.SetShutdownHook(func(s et.Session) {
+		protocol_probes.SweepMissedIPs(s, dis)
+	})
 
 	srv, err := server.NewServer(l, dis, mgr)
 	if err != nil || srv == nil {
@@ -85,6 +90,12 @@ func NewEngine(l *slog.Logger) (*Engine, error) {
 
 func (e *Engine) Shutdown() {
 	_ = e.Server.Shutdown()
+	// Sweep while the dispatcher pump can still claim resubmitted IPs.
+	// CancelSession (TerminateSession) also runs the hook; a second
+	// pass is a no-op once Protocol-Probes has marked the misses.
+	for _, s := range e.Manager.GetSessions() {
+		protocol_probes.SweepMissedIPs(s, e.Dispatcher)
+	}
 	e.Dispatcher.Shutdown()
 	e.Manager.Shutdown()
 }
