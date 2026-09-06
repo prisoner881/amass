@@ -311,9 +311,22 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 							endWork = true
 							endWorkAt = time.Now()
 							finished = 0
-						} else if finished == 5 && endWork && time.Since(endWorkAt) >= 15*time.Second {
-							close(done)
-							return
+							_ = term.Reset(timeoutDur)
+						} else if finished == 5 && endWork {
+							ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+							hookDone, herr := c.EndWorkDone(ctx, token)
+							cancel()
+							if herr == nil && hookDone {
+								_, _ = afmt.R.Fprintf(color.Error, "Session-end work finished.\n")
+								close(done)
+								return
+							}
+							if time.Since(endWorkAt) >= 30*time.Second {
+								_, _ = afmt.R.Fprintf(color.Error, "Waiting for session-end hook to finish...\n")
+								endWorkAt = time.Now()
+							}
+							finished = 0
+							_ = term.Reset(timeoutDur)
 						}
 					} else {
 						finished = 0
