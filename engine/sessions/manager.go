@@ -26,9 +26,10 @@ import (
 
 type manager struct {
 	sync.RWMutex
-	logger   *slog.Logger
-	registry et.Registry
-	sessions map[uuid.UUID]et.Session
+	logger       *slog.Logger
+	registry     et.Registry
+	sessions     map[uuid.UUID]et.Session
+	shutdownHook func(et.Session)
 }
 
 // NewManager: creates a new session storage.
@@ -68,12 +69,26 @@ func (r *manager) AddSession(s et.Session) error {
 	return nil
 }
 
+func (r *manager) SetShutdownHook(fn func(et.Session)) {
+	r.Lock()
+	r.shutdownHook = fn
+	r.Unlock()
+}
+
 // CancelSession: cancels a session in a session storage.
 func (r *manager) CancelSession(id uuid.UUID) {
 	s := r.GetSession(id)
 	if s == nil {
 		return
 	}
+
+	r.RLock()
+	hook := r.shutdownHook
+	r.RUnlock()
+	if hook != nil {
+		hook(s)
+	}
+
 	s.Kill()
 
 	r.Lock()
