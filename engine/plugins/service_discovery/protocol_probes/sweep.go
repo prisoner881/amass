@@ -42,11 +42,13 @@ func SweepMissedIPs(s et.Session, d et.Dispatcher) {
 	}
 
 	log := s.Log().WithGroup("plugin").With("name", "Protocol-Probes").With("handler", "session-end-sweep")
+	support.SetEndWorkPhase(s, "idle-wait")
 
 	if !waitIPIdle(s, sweepIdleTimeout) {
 		log.Warn("IP pipeline still busy; sweeping only Done rows")
 	}
 
+	support.SetEndWorkPhase(s, "listing")
 	ids, err := s.Backlog().ListDone(oam.IPAddress)
 	if err != nil {
 		log.Error("failed to list Done IP backlog rows", "error", err.Error())
@@ -66,6 +68,8 @@ func SweepMissedIPs(s et.Session, d et.Dispatcher) {
 
 	src := &et.Source{Name: "Protocol-Probes", Confidence: 80}
 	var submitted int
+	support.SetEndWorkCandidates(s, len(ids))
+	support.SetEndWorkPhase(s, "requeue")
 
 	for _, id := range ids {
 		if submitted >= sweepMaxResubmit {
@@ -114,19 +118,23 @@ func SweepMissedIPs(s et.Session, d et.Dispatcher) {
 			continue
 		}
 		submitted++
+		support.AddEndWorkRequeued(s, 1)
 		log.Info("requeued IP for Protocol-Probes",
 			"ip", ent.Asset.Key(), "open_ports", len(ports))
 	}
 
 	if submitted == 0 {
+		support.SetEndWorkPhase(s, "done")
 		log.Info("session-end sweep found no missed IPs")
 		return
 	}
 
 	log.Info("session-end sweep requeued IPs", "count", submitted)
+	support.SetEndWorkPhase(s, "drain")
 	if !waitIPIdle(s, sweepDrainWait) {
 		log.Warn("timed out waiting for swept IPs to drain")
 	}
+	support.SetEndWorkPhase(s, "done")
 }
 
 func seedScopedIP(s et.Session, ent *dbt.Entity) bool {
