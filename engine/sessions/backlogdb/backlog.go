@@ -335,3 +335,30 @@ func (b *BacklogDB) Counts(ctx context.Context, atype oam.AssetType) (queued, le
 	err = row.Scan(&queued, &leased, &done)
 	return
 }
+
+// ListDone returns entity_id values for rows of the given type in StateDone.
+func (b *BacklogDB) ListDone(ctx context.Context, atype oam.AssetType) ([]string, error) {
+	b.Lock()
+	defer b.Unlock()
+
+	rows, err := b.db.QueryContext(ctx, `
+		SELECT entity_id FROM backlog_items
+		WHERE etype = ? AND state = ?
+		ORDER BY created_at ASC`,
+		string(atype), StateDone,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var out []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
