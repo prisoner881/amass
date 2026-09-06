@@ -228,6 +228,7 @@ func (r *netblock) store(e *et.Event, cidr netip.Prefix, ip *dbt.Entity, asn int
 	if support.HasInScopeFQDN(ctx, e.Session, e.Entity) {
 		e.Session.Scope().Add(netblock)
 	}
+	support.AdmitOwnedNetblock(e, nb)
 
 	_, _ = e.Session.DB().CreateEntityProperty(ctx, nb, &general.SourceProperty{
 		Source:     r.plugin.source.Name,
