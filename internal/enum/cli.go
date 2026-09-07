@@ -265,11 +265,44 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 	}
 
 	done := make(chan struct{}, 1)
+	startEndWork := func(reason string) {
+		fmt.Println(reason)
+		_, _ = afmt.R.Fprintf(color.Error, "%s\n", reason)
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := c.RequestEndWork(ctx, token); err != nil {
+			fmt.Printf("Failed to start session-end work: %v\n", err)
+			_, _ = afmt.R.Fprintf(color.Error, "Failed to start session-end work: %v\n", err)
+		}
+		cancel()
+	}
+
+	// Logs must not share the wait-loop select. A busy subscribe
+	// channel starves the 2s ticker and --timeout fires before
+	// first-pass idle is ever detected.
+	go func() {
+		for {
+			select {
+			case <-done:
+				return
+			case message, ok := <-messages:
+				if !ok {
+					return
+				}
+				if err := tools.WriteLogMessage(l, message); err != nil {
+					fmt.Println(err.Error())
+				}
+			}
+		}
+	}()
+
 	go func() {
 		var previous, finished int
 		var endWork bool
 		var endWorkAt time.Time
 		timeoutDur := time.Duration(args.Timeout) * time.Minute
+		if timeoutDur <= 0 {
+			timeoutDur = 24 * time.Hour
+		}
 
 		term := time.NewTimer(timeoutDur)
 		defer term.Stop()
@@ -280,75 +313,79 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 			select {
 			case <-done:
 				return
-			case message := <-messages:
-				if err := tools.WriteLogMessage(l, message); err != nil {
-					fmt.Println(err.Error())
-				}
 			case <-t.C:
-				if stats, err := getStats(c, token); err == nil && stats != nil {
-					if !args.Options.Silent {
-						stotal := max(count, stats.WorkItemsTotal)
-						scomplete := max(0, stats.WorkItemsCompleted)
-
-						progress.SetTotal(int64(stotal))
-						progress.SetCurrent(int64(scomplete))
-					}
-
-					if comp := stats.WorkItemsCompleted; comp != previous {
-						previous = comp
-						_ = term.Reset(timeoutDur)
-					}
-
-					// Listing 100k Done IPs does not move WorkItems.
-					// Once end-work has started, keep enum alive until
-					// GET /end-work reports done.
+				stats, err := getStats(c, token)
+				if err != nil || stats == nil {
 					if endWork {
 						_ = term.Reset(timeoutDur)
-						ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-						hookDone, herr := c.EndWorkDone(ctx, token)
-						cancel()
-						if herr == nil && hookDone &&
-							stats.WorkItemsCompleted == stats.WorkItemsTotal {
-							finished++
-							if finished == 5 {
-								fmt.Println("Session-end work finished.")
-								_, _ = afmt.R.Fprintf(color.Error, "Session-end work finished.\n")
-								close(done)
-								return
-							}
-						} else {
-							finished = 0
-						}
-						if time.Since(endWorkAt) >= 30*time.Second {
-							fmt.Println("Waiting for session-end hook to finish...")
-							_, _ = afmt.R.Fprintf(color.Error, "Waiting for session-end hook to finish...\n")
-							endWorkAt = time.Now()
-						}
-						continue
 					}
+					continue
+				}
+				if !args.Options.Silent {
+					stotal := max(count, stats.WorkItemsTotal)
+					scomplete := max(0, stats.WorkItemsCompleted)
+					progress.SetTotal(int64(stotal))
+					progress.SetCurrent(int64(scomplete))
+				}
 
-					if stats.WorkItemsCompleted == stats.WorkItemsTotal {
+				idle := stats.WorkItemsCompleted == stats.WorkItemsTotal
+				if comp := stats.WorkItemsCompleted; comp != previous {
+					previous = comp
+					_ = term.Reset(timeoutDur)
+				}
+				if idle || endWork {
+					_ = term.Reset(timeoutDur)
+				}
+
+				if endWork {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+					hookDone, herr := c.EndWorkDone(ctx, token)
+					cancel()
+					if herr == nil && hookDone && idle {
 						finished++
 						if finished == 5 {
-							fmt.Println("First pass idle. Starting session-end work...")
-							_, _ = afmt.R.Fprintf(color.Error, "First pass idle. Starting session-end work...\n")
-							ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-							if err := c.RequestEndWork(ctx, token); err != nil {
-								_, _ = afmt.R.Fprintf(color.Error, "Failed to start session-end work: %v\n", err)
-							}
-							cancel()
-							endWork = true
-							endWorkAt = time.Now()
-							finished = 0
-							_ = term.Reset(timeoutDur)
+							fmt.Println("Session-end work finished.")
+							_, _ = afmt.R.Fprintf(color.Error, "Session-end work finished.\n")
+							close(done)
+							return
 						}
 					} else {
 						finished = 0
 					}
+					if herr != nil {
+						ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+						_ = c.RequestEndWork(ctx, token)
+						cancel()
+					}
+					if time.Since(endWorkAt) >= 30*time.Second {
+						fmt.Println("Waiting for session-end hook to finish...")
+						_, _ = afmt.R.Fprintf(color.Error, "Waiting for session-end hook to finish...\n")
+						endWorkAt = time.Now()
+					}
+					continue
+				}
+
+				if idle {
+					finished++
+					if finished == 5 {
+						startEndWork("First pass idle. Starting session-end work...")
+						endWork = true
+						endWorkAt = time.Now()
+						finished = 0
+					}
+				} else {
+					finished = 0
 				}
 			case <-term.C:
-				close(done)
-				return
+				fmt.Printf("No WorkItems progress for %s; starting session-end work.\n", timeoutDur)
+				_, _ = afmt.R.Fprintf(color.Error, "No WorkItems progress for %s; starting session-end work.\n", timeoutDur)
+				if !endWork {
+					startEndWork("First pass idle. Starting session-end work...")
+					endWork = true
+					endWorkAt = time.Now()
+					finished = 0
+				}
+				_ = term.Reset(timeoutDur)
 			}
 		}
 	}()
