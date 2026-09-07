@@ -299,9 +299,35 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 						_ = term.Reset(timeoutDur)
 					}
 
+					// Listing 100k Done IPs does not move WorkItems.
+					// Once end-work has started, keep enum alive until
+					// GET /end-work reports done.
+					if endWork {
+						_ = term.Reset(timeoutDur)
+						ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+						hookDone, herr := c.EndWorkDone(ctx, token)
+						cancel()
+						if herr == nil && hookDone &&
+							stats.WorkItemsCompleted == stats.WorkItemsTotal {
+							finished++
+							if finished == 5 {
+								_, _ = afmt.R.Fprintf(color.Error, "Session-end work finished.\n")
+								close(done)
+								return
+							}
+						} else {
+							finished = 0
+						}
+						if time.Since(endWorkAt) >= 30*time.Second {
+							_, _ = afmt.R.Fprintf(color.Error, "Waiting for session-end hook to finish...\n")
+							endWorkAt = time.Now()
+						}
+						continue
+					}
+
 					if stats.WorkItemsCompleted == stats.WorkItemsTotal {
 						finished++
-						if finished == 5 && !endWork {
+						if finished == 5 {
 							_, _ = afmt.R.Fprintf(color.Error, "First pass idle. Starting session-end work...\n")
 							ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 							if err := c.RequestEndWork(ctx, token); err != nil {
@@ -310,21 +336,6 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 							cancel()
 							endWork = true
 							endWorkAt = time.Now()
-							finished = 0
-							_ = term.Reset(timeoutDur)
-						} else if finished == 5 && endWork {
-							ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-							hookDone, herr := c.EndWorkDone(ctx, token)
-							cancel()
-							if herr == nil && hookDone {
-								_, _ = afmt.R.Fprintf(color.Error, "Session-end work finished.\n")
-								close(done)
-								return
-							}
-							if time.Since(endWorkAt) >= 30*time.Second {
-								_, _ = afmt.R.Fprintf(color.Error, "Waiting for session-end hook to finish...\n")
-								endWorkAt = time.Now()
-							}
 							finished = 0
 							_ = term.Reset(timeoutDur)
 						}
