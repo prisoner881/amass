@@ -268,10 +268,14 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 	startEndWork := func(reason string) {
 		fmt.Println(reason)
 		_, _ = afmt.R.Fprintf(color.Error, "%s\n", reason)
+		l.Info(reason)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		if err := c.RequestEndWork(ctx, token); err != nil {
 			fmt.Printf("Failed to start session-end work: %v\n", err)
 			_, _ = afmt.R.Fprintf(color.Error, "Failed to start session-end work: %v\n", err)
+			l.Error("Failed to start session-end work", "err", err)
+		} else {
+			l.Info("POST /end-work accepted", "session", token.String())
 		}
 		cancel()
 	}
@@ -346,6 +350,7 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 						if finished == 5 {
 							fmt.Println("Session-end work finished.")
 							_, _ = afmt.R.Fprintf(color.Error, "Session-end work finished.\n")
+							l.Info("Session-end work finished", "session", token.String())
 							close(done)
 							return
 						}
@@ -360,6 +365,7 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 					if time.Since(endWorkAt) >= 30*time.Second {
 						fmt.Println("Waiting for session-end hook to finish...")
 						_, _ = afmt.R.Fprintf(color.Error, "Waiting for session-end hook to finish...\n")
+						l.Info("Waiting for session-end hook to finish", "session", token.String())
 						endWorkAt = time.Now()
 					}
 					continue
@@ -379,6 +385,8 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 			case <-term.C:
 				fmt.Printf("No WorkItems progress for %s; starting session-end work.\n", timeoutDur)
 				_, _ = afmt.R.Fprintf(color.Error, "No WorkItems progress for %s; starting session-end work.\n", timeoutDur)
+				l.Info("No WorkItems progress; starting session-end work",
+					"timeout", timeoutDur.String(), "session", token.String())
 				if !endWork {
 					startEndWork("First pass idle. Starting session-end work...")
 					endWork = true
