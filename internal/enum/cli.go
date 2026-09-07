@@ -311,6 +311,7 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 							stats.WorkItemsCompleted == stats.WorkItemsTotal {
 							finished++
 							if finished == 5 {
+								fmt.Println("Session-end work finished.")
 								_, _ = afmt.R.Fprintf(color.Error, "Session-end work finished.\n")
 								close(done)
 								return
@@ -319,6 +320,7 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 							finished = 0
 						}
 						if time.Since(endWorkAt) >= 30*time.Second {
+							fmt.Println("Waiting for session-end hook to finish...")
 							_, _ = afmt.R.Fprintf(color.Error, "Waiting for session-end hook to finish...\n")
 							endWorkAt = time.Now()
 						}
@@ -328,6 +330,7 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 					if stats.WorkItemsCompleted == stats.WorkItemsTotal {
 						finished++
 						if finished == 5 {
+							fmt.Println("First pass idle. Starting session-end work...")
 							_, _ = afmt.R.Fprintf(color.Error, "First pass idle. Starting session-end work...\n")
 							ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 							if err := c.RequestEndWork(ctx, token); err != nil {
