@@ -97,11 +97,27 @@ func makeSink() pipeline.SinkFunc {
 }
 
 func sendElementOnExit(ede *et.EventDataElement) {
-	select {
-	case ede.Exit <- ede:
-	default:
+	if ede == nil {
+		return
+	}
+	if ede.Exit != nil {
+		select {
+		case ede.Exit <- ede:
+			return
+		default:
+		}
+	}
+	// cchan is full, the completion goroutine is stuck, or Exit is nil.
+	// The old non-blocking send dropped the element: backlog row stayed
+	// leased forever (SetLeaseTTL(0) never reclaims; pumpOnce skips when
+	// Queued==0; enum waits for WorkItems idle that never comes).
+	// The pipeline has already finished this element, so Ack is correct.
+	// A later completedCallback Ack of the same row is a no-op.
+	if ede.Event != nil && ede.Event.Session != nil && ede.Event.Entity != nil {
+		_ = ede.Event.Session.Backlog().Ack(ede.Event.Entity, false)
 	}
 }
+
 
 func handlerTask(h *et.Handler) pipeline.TaskFunc {
 	if h == nil || h.Callback == nil {
@@ -109,7 +125,7 @@ func handlerTask(h *et.Handler) pipeline.TaskFunc {
 	}
 
 	r := h
-	return pipeline.TaskFunc(func(ctx context.Context, data pipeline.Data, tp pipeline.TaskParams) (pipeline.Data, error) {
+	return pipeline.TaskFunc(func(ctx context.Context, data pipeline.Data, tp pipeline.TaskParams) (out pipeline.Data, err error) {
 		if data == nil {
 			return nil, fmt.Errorf("%s pipeline task received a nil data element", h.Name)
 		}
@@ -118,6 +134,14 @@ func handlerTask(h *et.Handler) pipeline.TaskFunc {
 		if !ok || ede == nil {
 			return nil, fmt.Errorf("%s pipeline task failed to extract the EventDataElement", h.Name)
 		}
+
+		defer func() {
+			if rec := recover(); rec != nil {
+				ede.Error = multierror.Append(ede.Error, fmt.Errorf("panic in %s: %v", h.Name, rec))
+				sendElementOnExit(ede)
+				out, err = nil, nil
+			}
+		}()
 
 		select {
 		case <-ctx.Done():
