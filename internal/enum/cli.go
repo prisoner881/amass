@@ -303,6 +303,7 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 		var previous, finished int
 		var endWork bool
 		var endWorkAt time.Time
+		var hookDoneAt time.Time
 		timeoutDur := time.Duration(args.Timeout) * time.Minute
 		if timeoutDur <= 0 {
 			timeoutDur = 24 * time.Hour
@@ -345,14 +346,31 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 					hookDone, herr := c.EndWorkDone(ctx, token)
 					cancel()
-					if herr == nil && hookDone && idle {
-						finished++
-						if finished == 5 {
-							fmt.Println("Session-end work finished.")
-							_, _ = afmt.R.Fprintf(color.Error, "Session-end work finished.\n")
-							l.Info("Session-end work finished", "session", token.String())
+					if herr == nil && hookDone {
+						if hookDoneAt.IsZero() {
+							hookDoneAt = time.Now()
+						}
+						// idle is the happy path. If WorkItems never idle
+						// (stranded leases), do not wait forever — the hook
+						// has already finished its real work.
+						if idle {
+							finished++
+							if finished == 5 {
+								fmt.Println("Session-end work finished.")
+								_, _ = afmt.R.Fprintf(color.Error, "Session-end work finished.\n")
+								l.Info("Session-end work finished", "session", token.String())
+								close(done)
+								return
+							}
+						} else if time.Since(hookDoneAt) >= 2*time.Minute {
+							fmt.Println("Session-end work finished (WorkItems not idle; stranded leases).")
+							_, _ = afmt.R.Fprintf(color.Error, "Session-end work finished (WorkItems not idle; stranded leases).\n")
+							l.Warn("session-end hook done but WorkItems not idle",
+								"session", token.String(), "waited", time.Since(hookDoneAt).String())
 							close(done)
 							return
+						} else {
+							finished = 0
 						}
 					} else {
 						finished = 0
