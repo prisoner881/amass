@@ -102,7 +102,9 @@ func missListBatch(s et.Session, doneIDs []string, prefilterSince, protoSince ti
 		return nil, true, nil
 	}
 
-	ctx, cancel := context.WithTimeout(s.Ctx(), 30*time.Second)
+	// 90s is past asset-db's 60s statement_timeout on this *sql.DB so
+	// a stuck SELECT surfaces as a Postgres error, not a Go race.
+	ctx, cancel := context.WithTimeout(s.Ctx(), 90*time.Second)
 	defer cancel()
 
 	rows, qerr := db.QueryContext(ctx, missListSQL,
