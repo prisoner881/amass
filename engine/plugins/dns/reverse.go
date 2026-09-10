@@ -123,7 +123,26 @@ func (d *dnsReverse) lookup(e *et.Event, fqdn *dbt.Entity, since time.Time) []*r
 func (d *dnsReverse) query(e *et.Event, ipstr string, ptr *dbt.Entity) []*relRev {
 	var rev []*relRev
 
-	if rr, err := support.PerformQuery(e.Session.Ctx(), ipstr, dns.TypePTR); err == nil {
+	// PTR lookups triggered while the engine is in -active mode are
+	// considered active-derived traffic and MUST egress through the
+	// operator-configured active proxy. When ActiveStrict is off and no
+	// active egress is available we fall back to the trusted resolver pool
+	// for backwards compatibility, matching the documented "softer default".
+	var (
+		rr  []dns.RR
+		err error
+	)
+	if e.Session.Config().Active && e.Session.ActiveEgress() != nil {
+		rr, err = support.PerformActiveQuery(e.Session.Ctx(), e.Session, ipstr, dns.TypePTR)
+	} else if e.Session.Config().Active && e.Session.Config().ActiveStrict {
+		e.Session.Log().Warn("skipping active PTR query: no active egress configured",
+			"ip", ipstr, slog.Group("plugin", "name", d.plugin.name, "handler", d.name))
+		return rev
+	} else {
+		rr, err = support.PerformQuery(e.Session.Ctx(), ipstr, dns.TypePTR)
+	}
+
+	if err == nil {
 		if records := d.store(e, ptr, rr); len(records) > 0 {
 			rev = append(rev, records...)
 		}
