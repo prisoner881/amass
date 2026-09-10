@@ -67,11 +67,30 @@ func SweepMissedIPs(s et.Session, d et.Dispatcher) {
 	}
 
 	src := &et.Source{Name: "Protocol-Probes", Confidence: 80}
-	var submitted int
-	support.SetEndWorkCandidates(s, len(ids))
+
+	missIDs, batched, berr := missListBatch(s, ids, prefilterSince, protoSince)
+	if berr != nil {
+		log.Warn("batch miss-list query failed; falling back to per-IP walk",
+			"error", berr.Error(), "done_ips", len(ids))
+	} else if batched {
+		log.Info("batch miss-list query",
+			"done_ips", len(ids), "misses", len(missIDs))
+	}
+
+	var walk []string
+	var skipFilters bool
+	if batched && berr == nil {
+		walk = missIDs
+		skipFilters = true
+		support.SetEndWorkCandidates(s, len(missIDs))
+	} else {
+		walk = ids
+		support.SetEndWorkCandidates(s, len(ids))
+	}
 	support.SetEndWorkPhase(s, "requeue")
 
-	for _, id := range ids {
+	var submitted int
+	for _, id := range walk {
 		if submitted >= sweepMaxResubmit {
 			log.Warn("sweep cap reached", "cap", sweepMaxResubmit)
 			break
@@ -87,16 +106,17 @@ func SweepMissedIPs(s et.Session, d et.Dispatcher) {
 			continue
 		}
 
-		if !seedScopedIP(s, ent) {
-			continue
-		}
-
-		ports := support.OpenPortsForIP(s.Ctx(), s, ent, prefilterSince)
-		if len(ports) == 0 {
-			continue
-		}
-		if support.AssetMonitoredWithinTTL(s, ent, src, protoSince) {
-			continue
+		if !skipFilters {
+			if !seedScopedIP(s, ent) {
+				continue
+			}
+			ports := support.OpenPortsForIP(s.Ctx(), s, ent, prefilterSince)
+			if len(ports) == 0 {
+				continue
+			}
+			if support.AssetMonitoredWithinTTL(s, ent, src, protoSince) {
+				continue
+			}
 		}
 
 		ev := &et.Event{
@@ -119,8 +139,7 @@ func SweepMissedIPs(s et.Session, d et.Dispatcher) {
 		}
 		submitted++
 		support.AddEndWorkRequeued(s, 1)
-		log.Info("requeued IP for Protocol-Probes",
-			"ip", ent.Asset.Key(), "open_ports", len(ports))
+		log.Info("requeued IP for Protocol-Probes", "ip", ent.Asset.Key())
 	}
 
 	if submitted == 0 {
