@@ -93,18 +93,26 @@ func (pp *portPrefilter) check(e *et.Event) error {
 		return nil
 	}
 
-	support.EnsureOpenPortsScanned(e, e.Entity, selectDialer(e))
+	dial, err := selectDialer(e)
+	if err != nil {
+		e.Session.Log().Warn("skipping port prefilter: no active egress configured",
+			"error", err.Error())
+		return nil
+	}
+	support.EnsureOpenPortsScanned(e, e.Entity, dial)
 	return nil
 }
 
-// selectDialer mirrors protocol_probes' own function of the same name
-// and purpose exactly - a single, deliberate integration point for
-// feature/active-proxy-egress once merged, so this plugin
-// automatically inherits proxy-routed egress without any further
-// changes here, the same reasoning behind PeekBanner's own dial
-// injection in protocol_probes/banner_peek.go. A nil dial (the only
-// option this branch has available today) falls back to
-// support.scanPorts' own use of amassnet.NewDialContext.
-func selectDialer(e *et.Event) amassnet.DialContext {
-	return amassnet.NewDialContext(support.PortPrefilterScanTimeout)
+// selectDialer is the single integration point for this plugin's
+// TCP connect scan. Same rule as JARM and Protocol-Probes:
+// proxy when ActiveEgress is set; fail closed when ActiveStrict;
+// direct dial only when the operator opted out of strict mode.
+func selectDialer(e *et.Event) (amassnet.DialContext, error) {
+	if ae := e.Session.ActiveEgress(); ae != nil {
+		return ae.DialContext, nil
+	}
+	if e.Session.Config().ActiveStrict {
+		return nil, amassnet.ErrNoActiveEgress
+	}
+	return amassnet.NewDialContext(support.PortPrefilterScanTimeout), nil
 }
