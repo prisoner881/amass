@@ -19,6 +19,7 @@ import (
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
 	et "github.com/owasp-amass/amass/v5/engine/types"
 	amassnet "github.com/owasp-amass/amass/v5/internal/net"
+	amassdns "github.com/owasp-amass/amass/v5/internal/net/dns"
 	amasshttp "github.com/owasp-amass/amass/v5/internal/net/http"
 	dbt "github.com/owasp-amass/asset-db/types"
 	oam "github.com/owasp-amass/open-asset-model"
@@ -155,7 +156,7 @@ func (t *ipTHC) queryFQDN(e *et.Event, apex string) ([]*dbt.Entity, bool) {
 	var inScope []string
 	var dropped int
 	for _, n := range append(subs, cnames...) {
-		n = strings.ToLower(strings.TrimSpace(n))
+		n = normalizeTHCName(n)
 		if n == "" {
 			continue
 		}
@@ -231,7 +232,7 @@ func (t *ipTHC) checkIP(e *et.Event) error {
 	seen := make(map[string]struct{}, len(raw))
 	var inScope []string
 	for _, n := range raw {
-		n = strings.ToLower(strings.TrimSpace(n))
+		n = normalizeTHCName(n)
 		if n == "" {
 			continue
 		}
@@ -377,8 +378,7 @@ func parseTHCDomainCSV(body string) []string {
 		if col >= len(rec) {
 			continue
 		}
-		n := strings.ToLower(strings.TrimSpace(rec[col]))
-		n = strings.TrimSuffix(n, ".")
+		n := normalizeTHCName(rec[col])
 		if n == "" || !strings.Contains(n, ".") {
 			continue
 		}
@@ -402,4 +402,13 @@ func thcDomainColumn(header []string) (int, bool) {
 		return 0, false
 	}
 	return 0, true
+}
+
+// normalizeTHCName matches CertSpotter/crt.sh: strip wildcard labels
+// (*.apps.example.com → apps.example.com) so we never persist a literal '*'.
+func normalizeTHCName(n string) string {
+	n = strings.ToLower(strings.TrimSpace(n))
+	n = strings.TrimSuffix(n, ".")
+	n = strings.ToLower(strings.TrimSpace(amassdns.RemoveAsteriskLabel(n)))
+	return n
 }
