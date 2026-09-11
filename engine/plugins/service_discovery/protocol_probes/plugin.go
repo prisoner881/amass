@@ -71,33 +71,19 @@ func allRecogDBs() []string {
 	return out
 }
 
-// selectDialer is the single, deliberately isolated place that decides
-// which dialer this plugin's active-only traffic (banner peeks, raw
-// TLS cert handshakes) actually uses. On this branch today it can only
-// ever return the plain, direct dialer - the active-proxy-egress
-// mechanism (Session.ActiveEgress(), Config().ActiveStrict) doesn't
-// exist on main yet, so there is nothing else to select.
-//
-// *** REQUIRED UPDATE ONCE MERGED WITH feature/active-proxy-egress ***
-// Replace this function's body with the exact same pattern JARM's own
-// raw dial already uses on that branch, in
-// engine/plugins/support/fingerprinting.go:
-//
-//	var dial amassnet.DialContext
-//	if ae := e.Session.ActiveEgress(); ae != nil {
-//	    dial = ae.DialContext
-//	} else if e.Session.Config().ActiveStrict {
-//	    return nil, amassnet.ErrNoActiveEgress
-//	} else {
-//	    dial = amassnet.NewDialContext(PeekTimeout)
-//	}
-//
-// Every other line in this package - PeekBanner, HarvestCertificate,
-// dialAndGetCertChain - already accepts an injected amassnet.DialContext
-// and needs no further changes; this function is the only integration
-// point.
-func selectDialer(e *et.Event) amassnet.DialContext {
-	return amassnet.NewDialContext(PeekTimeout)
+// selectDialer is the single integration point for this plugin's
+// active-only traffic (banner peeks, raw TLS cert handshakes).
+// Same rule as JARM (engine/plugins/support/fingerprinting.go):
+// proxy when ActiveEgress is set; fail closed when ActiveStrict;
+// direct dial only when the operator opted out of strict mode.
+func selectDialer(e *et.Event) (amassnet.DialContext, error) {
+	if ae := e.Session.ActiveEgress(); ae != nil {
+		return ae.DialContext, nil
+	}
+	if e.Session.Config().ActiveStrict {
+		return nil, amassnet.ErrNoActiveEgress
+	}
+	return amassnet.NewDialContext(PeekTimeout), nil
 }
 
 type protocolProbes struct {
@@ -224,7 +210,12 @@ func (pp *protocolProbes) check(e *et.Event) error {
 	}
 
 	addr := ip.Address.String()
-	dial := selectDialer(e)
+	dial, err := selectDialer(e)
+	if err != nil {
+		pp.log.Warn("skipping protocol probes: no active egress configured",
+			"ip", addr, "error", err.Error())
+		return nil
+	}
 
 	// Most-likely-to-be-open ports first (nmap's own real, published
 	// frequency data) - harmless for a normal asset, since every port
