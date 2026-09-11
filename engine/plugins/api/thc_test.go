@@ -33,6 +33,13 @@ func TestParseTHCDomainCSV(t *testing.T) {
 	if len(parseTHCDomainCSV("")) != 0 {
 		t.Fatal("empty body should yield no names")
 	}
+
+	wild := "domain\n*.apps.example.com\nwww.example.com\n*.example.com\n"
+	got = parseTHCDomainCSV(wild)
+	want = []string{"apps.example.com", "www.example.com", "example.com"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("wildcard csv: got %v want %v", got, want)
+	}
 }
 
 func TestV4Slash24(t *testing.T) {
