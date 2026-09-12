@@ -228,7 +228,7 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 	var count int
 	// create all assets defined in the scope on the server
 	for _, a := range convertScopeToAssets(cfg.Scope) {
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
 		defer cancel()
 
 		if _, err := c.CreateAsset(ctx, token, a); err != nil {
