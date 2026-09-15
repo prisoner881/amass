@@ -1,4 +1,4 @@
-// Copyright © by Jeff Foley 2017-2026. All rights reserved.
+﻿// Copyright © by Jeff Foley 2017-2026. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -24,46 +24,45 @@ import (
 var createOrgLock sync.Mutex
 
 func CreateOrgAsset(sess et.Session, obj *dbt.Entity, rel oam.Relation, o *oamorg.Organization, src *et.Source) (*dbt.Entity, error) {
-	createOrgLock.Lock()
-	defer createOrgLock.Unlock()
-
 	if o == nil || o.Name == "" {
 		return nil, errors.New("missing the organization name")
 	} else if src == nil {
 		return nil, errors.New("missing the source")
 	}
 
-	orgent, err := FindOrgByNameClaim(sess, o.Name, src)
-	if err != nil && o.LegalName != "" {
-		orgent, _ = FindOrgByLegalNameClaim(sess, o.LegalName, src)
-	}
-
-	normName := genNormName(o)
 	if o.Jurisdiction != "" {
-		// attempt to normalize the jurisdiction country
 		if code := countries.ByName(o.Jurisdiction); code.IsValid() {
 			o.Jurisdiction = code.Alpha2()
-		}
-		if o.RegistrationID != "" {
-			orgent, _ = FindOrgByJurisdictionAndRegistrationIDClaim(sess, o.Jurisdiction, o.RegistrationID)
-		}
-		if orgent == nil {
-			orgent, _ = FindOrgByNormNameAndJurisdictionClaim(sess, normName, o.Jurisdiction)
 		}
 	}
 
 	dName := o.Name
-	o.Name = normName
+	orgent := lookupOrgByClaims(sess, dName, o, src)
+
+	o.Name = genNormName(o)
+	// Graph walk (may hit the shared DB). Do not hold createOrgLock.
 	if orgent == nil && obj != nil {
 		orgent = dedupChecks(sess, obj, o)
+	}
+
+	createOrgLock.Lock()
+	defer createOrgLock.Unlock()
+
+	if orgent == nil {
+		orgent = lookupOrgByClaims(sess, dName, o, src)
+	}
+	if orgent == nil {
+		if found, ok := nameExistsInSessionScope(sess, o); ok {
+			orgent = found
+		}
 	}
 
 	if orgent == nil {
 		ctx, cancel := context.WithTimeout(sess.Ctx(), 10*time.Second)
 		defer cancel()
 
-		var err error
 		o.ID = genStableOrgID(o)
+		var err error
 		orgent, err = sess.DB().CreateAsset(ctx, o)
 		if err != nil || orgent == nil {
 			return nil, errors.New("failed to create the Organization asset")
@@ -71,7 +70,6 @@ func CreateOrgAsset(sess et.Session, obj *dbt.Entity, rel oam.Relation, o *oamor
 	}
 
 	if orgent != nil {
-		// create name and jurisdiction claims provided by the caller
 		_, _ = CreateOrgNameClaim(sess, orgent, dName, src)
 
 		if o.LegalName != "" {
@@ -87,7 +85,6 @@ func CreateOrgAsset(sess et.Session, obj *dbt.Entity, rel oam.Relation, o *oamor
 		ctx, cancel := context.WithTimeout(sess.Ctx(), 10*time.Second)
 		defer cancel()
 
-		// identify this caller as a source of the Organization asset
 		_, _ = sess.DB().CreateEntityProperty(ctx, orgent, &oamgen.SourceProperty{
 			Source:     src.Name,
 			Confidence: src.Confidence,
@@ -106,6 +103,25 @@ func CreateOrgAsset(sess et.Session, obj *dbt.Entity, rel oam.Relation, o *oamor
 	}
 
 	return nil, errors.New("failed to discover or create the Organization asset")
+}
+
+func lookupOrgByClaims(sess et.Session, name string, o *oamorg.Organization, src *et.Source) *dbt.Entity {
+	if name == "" {
+		name = o.Name
+	}
+	orgent, err := FindOrgByNameClaim(sess, name, src)
+	if err != nil && o.LegalName != "" {
+		orgent, _ = FindOrgByLegalNameClaim(sess, o.LegalName, src)
+	}
+	if o.Jurisdiction != "" {
+		if o.RegistrationID != "" {
+			orgent, _ = FindOrgByJurisdictionAndRegistrationIDClaim(sess, o.Jurisdiction, o.RegistrationID)
+		}
+		if orgent == nil {
+			orgent, _ = FindOrgByNormNameAndJurisdictionClaim(sess, genNormName(o), o.Jurisdiction)
+		}
+	}
+	return orgent
 }
 
 func genNormName(o *oamorg.Organization) string {
