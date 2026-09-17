@@ -1,4 +1,4 @@
-// Copyright Â© by Jeff Foley 2017-2026. All rights reserved.
+// Copyright © by Jeff Foley 2017-2026. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -9,7 +9,6 @@ import (
 	"github.com/owasp-amass/amass/v5/engine/plugins/api/aviato"
 	"github.com/owasp-amass/amass/v5/engine/plugins/api/gleif"
 	"github.com/owasp-amass/amass/v5/engine/plugins/api/rdap"
-	"github.com/owasp-amass/amass/v5/engine/plugins/archive"
 	"github.com/owasp-amass/amass/v5/engine/plugins/brute"
 	"github.com/owasp-amass/amass/v5/engine/plugins/dns"
 	"github.com/owasp-amass/amass/v5/engine/plugins/enrich"
@@ -17,6 +16,8 @@ import (
 	"github.com/owasp-amass/amass/v5/engine/plugins/scrape"
 	dnssd "github.com/owasp-amass/amass/v5/engine/plugins/service_discovery/dns"
 	hp "github.com/owasp-amass/amass/v5/engine/plugins/service_discovery/http_probes"
+	"github.com/owasp-amass/amass/v5/engine/plugins/service_discovery/port_prefilter"
+	pp "github.com/owasp-amass/amass/v5/engine/plugins/service_discovery/protocol_probes"
 	"github.com/owasp-amass/amass/v5/engine/plugins/whois"
 	"github.com/owasp-amass/amass/v5/engine/plugins/whois/bgptools"
 	et "github.com/owasp-amass/amass/v5/engine/types"
@@ -24,20 +25,24 @@ import (
 
 var pluginNewFuncs = []func() et.Plugin{
 	api.NewBinaryEdge,
+	api.NewCertSpotter,
 	api.NewChaos,
+	api.NewCommonCrawl,
 	api.NewCrtsh,
+	api.NewDNSDumpster,
 	api.NewDNSRepo,
 	api.NewGrepApp,
 	api.NewHackerTarget,
+	api.NewIPTHC,
 	//api.NewHunterIO,
 	api.NewLeakIX,
 	api.NewPassiveTotal,
 	api.NewProspeo,
 	api.NewSecurityTrails,
-	//api.NewURLScan,
+	api.NewSubdomainCenter,
+	api.NewURLScan,
 	api.NewVirusTotal,
 	api.NewZetalytics,
-	archive.NewWayback,
 	aviato.NewAviato,
 	bgptools.NewBGPTools,
 	brute.NewFQDNAlterations,
@@ -45,16 +50,17 @@ var pluginNewFuncs = []func() et.Plugin{
 	dnssd.NewDNSPlugin,
 	enrich.NewBannerURLs,
 	enrich.NewContacts,
+	enrich.NewTechStack,
 	enrich.NewEmails,
 	enrich.NewTLSCerts,
 	enrich.NewURLs,
 	gleif.NewGLEIF,
 	horizontals.NewHorizontals,
 	hp.NewHTTPProbing,
+	port_prefilter.NewPortPrefilter,
+	pp.NewProtocolProbes,
 	rdap.NewRDAP,
-	scrape.NewBing,
 	scrape.NewDNSHistory,
-	scrape.NewDuckDuckGo,
 	scrape.NewIPVerse,
 	scrape.NewRapidDNS,
 	scrape.NewSiteDossier,
@@ -62,6 +68,7 @@ var pluginNewFuncs = []func() et.Plugin{
 	NewIPNetblock,
 	NewJARMFingerprints,
 	NewKnownFQDN,
+	NewPageLinks,
 }
 
 func LoadAndStartPlugins(r et.Registry) error {
