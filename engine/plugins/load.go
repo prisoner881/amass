@@ -1,4 +1,4 @@
-// Copyright © by Jeff Foley 2017-2026. All rights reserved.
+﻿// Copyright (c) by Jeff Foley 2017-2026. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -9,7 +9,6 @@ import (
 	"github.com/owasp-amass/amass/v5/engine/plugins/api/aviato"
 	"github.com/owasp-amass/amass/v5/engine/plugins/api/gleif"
 	"github.com/owasp-amass/amass/v5/engine/plugins/api/rdap"
-	"github.com/owasp-amass/amass/v5/engine/plugins/archive"
 	"github.com/owasp-amass/amass/v5/engine/plugins/brute"
 	"github.com/owasp-amass/amass/v5/engine/plugins/dns"
 	"github.com/owasp-amass/amass/v5/engine/plugins/enrich"
@@ -25,6 +24,7 @@ import (
 )
 
 var pluginNewFuncs = []func() et.Plugin{
+	api.NewAlienVault,
 	api.NewBinaryEdge,
 	api.NewCertSpotter,
 	api.NewChaos,
@@ -44,7 +44,6 @@ var pluginNewFuncs = []func() et.Plugin{
 	api.NewURLScan,
 	api.NewVirusTotal,
 	api.NewZetalytics,
-	archive.NewWayback,
 	aviato.NewAviato,
 	bgptools.NewBGPTools,
 	brute.NewFQDNAlterations,
@@ -62,9 +61,7 @@ var pluginNewFuncs = []func() et.Plugin{
 	port_prefilter.NewPortPrefilter,
 	pp.NewProtocolProbes,
 	rdap.NewRDAP,
-	scrape.NewBing,
 	scrape.NewDNSHistory,
-	scrape.NewDuckDuckGo,
 	scrape.NewIPVerse,
 	scrape.NewRapidDNS,
 	scrape.NewSiteDossier,
