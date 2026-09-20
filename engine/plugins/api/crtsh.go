@@ -1,4 +1,4 @@
-// Copyright © by Jeff Foley 2017-2026. All rights reserved.
+// Copyright (c) by Jeff Foley 2017-2026. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -36,7 +36,17 @@ func NewCrtsh() et.Plugin {
 		name:   "crt.sh",
 		rlimit: rate.NewLimiter(limit, 1),
 		source: &et.Source{
-			Name:       "HackerTarget",
+			// Was "HackerTarget". That name is hackertarget.go's own
+			// source, and et.Source.Name is what MarkAssetMonitored
+			// writes as the last_monitored value and what
+			// StoreFQDNsWithSource writes as the SourceProperty. The
+			// collision put both plugins in a single TTL slot: whichever
+			// ran first marked it and the other skipped its query, and a
+			// failed crt.sh call still burned the slot for both, because
+			// check() marks regardless of query outcome. Measured at
+			// 153:1 in crt.sh's favor, so HackerTarget was effectively
+			// dark and its findings were filed under the wrong source.
+			Name:       "crt.sh",
 			Confidence: 100,
 		},
 	}
