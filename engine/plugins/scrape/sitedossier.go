@@ -1,4 +1,4 @@
-// Copyright © by Jeff Foley 2017-2026. All rights reserved.
+// Copyright (c) by Jeff Foley 2017-2026. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -113,11 +113,25 @@ func (sd *siteDossier) query(e *et.Event, name string) []*dbt.Entity {
 		resp, err := amasshttp.RequestWebPage(ctx,
 			e.Session.Clients().General, &amasshttp.Request{URL: fmt.Sprintf(sd.fmtstr, name, i)})
 		e.Session.NetSem().Release()
-		if err != nil || resp.Body == "" {
+		// Break on transport error or any non-2xx status. The prior
+		// check was `resp.Body == ""`, which never fires against a real
+		// web server (even an error page has a body) and never inspected
+		// StatusCode, so a 403 or other block ran all 19 pages, burning
+		// 19 rate-limiter tokens per seed for zero results.
+		if err != nil || resp == nil || resp.StatusCode < 200 || resp.StatusCode > 299 {
 			break
 		}
 
-		for _, n := range support.ScrapeSubdomainNames(resp.Body) {
+		// A page that scrapes no names at all means blocked, empty, or
+		// past the end of pagination; later pages will not have more.
+		// Test scraped names, not in-scope names: a page full of
+		// out-of-scope or duplicate names is still a working page.
+		scraped := support.ScrapeSubdomainNames(resp.Body)
+		if len(scraped) == 0 {
+			break
+		}
+
+		for _, n := range scraped {
 			nstr := strings.ToLower(strings.TrimSpace(n))
 			// if the subdomain is not in scope, skip it
 			if _, conf := e.Session.Scope().IsAssetInScope(&oamdns.FQDN{Name: nstr}, 0); conf > 0 {
