@@ -1,4 +1,4 @@
-// Copyright © by Jeff Foley 2017-2026. All rights reserved.
+// Copyright (c) by Jeff Foley 2017-2026. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -216,10 +216,9 @@ func CreateServiceAsset(session et.Session, src *dbt.Entity, rel oam.Relation, s
 
 // ResolvingFQDNs returns every FQDN with a dns_record edge pointing at
 // the given entity (expected to be an IPAddress). Shared low-level
-// primitive behind HasInScopeFQDN below and PreferredSNIHostname in
-// certharvest.go - both need the same underlying lookup, just for
-// different purposes (a scope-membership check vs. picking a hostname
-// to present via SNI). Returns nil if none exist or the lookup fails.
+// primitive behind PreferredSNIHostname in certharvest.go and other
+// callers that need the same underlying lookup. Returns nil if none
+// exist or the lookup fails.
 //
 // The extra FindEntityById call per edge is required, not optional -
 // confirmed directly against the real asset-db source (both its
@@ -255,27 +254,6 @@ func ResolvingFQDNs(ctx context.Context, session et.Session, ent *dbt.Entity) []
 		}
 	}
 	return fqdns
-}
-
-// HasInScopeFQDN checks whether at least one FQDN with a dns_record
-// edge pointing at the given entity (expected to be an IPAddress) is
-// itself confirmed in scope. This is the deliberate, targeted gate for
-// netblock scope registration in ip_netblock.go and
-// whois/bgptools/netblock.go - see the comment on the Scope.Add() call
-// site in ip_netblock.go for the full reasoning. An IP discovered via
-// a genuine forward DNS resolution from an in-scope domain passes; an
-// IP that only has a reverse-DNS (ptr_record) path, or no in-scope
-// FQDN pointing to it at all, does not - PTR records are a well-known
-// unreliable signal for this purpose (frequently misconfigured,
-// pointing at unrelated organizations), so a bare reverse-DNS hit
-// alone deliberately isn't treated as sufficient here.
-func HasInScopeFQDN(ctx context.Context, session et.Session, ent *dbt.Entity) bool {
-	for _, fqdn := range ResolvingFQDNs(ctx, session, ent) {
-		if _, conf := session.Scope().IsAssetInScope(fqdn, 0); conf > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 // PreferredSNIHostname picks the best available hostname to present
