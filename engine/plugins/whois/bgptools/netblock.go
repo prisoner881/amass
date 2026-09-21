@@ -1,4 +1,4 @@
-// Copyright © by Jeff Foley 2017-2026. All rights reserved.
+// Copyright (c) by Jeff Foley 2017-2026. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -219,13 +219,18 @@ func (r *netblock) store(e *et.Event, cidr netip.Prefix, ip *dbt.Entity, asn int
 	}
 
 	// Registers the discovered netblock with the session's live scope
-	// tracker, not just the database - but only when the triggering IP
-	// genuinely traces back to something already in scope. See
-	// support.HasInScopeFQDN and the equivalent, fuller comment in
-	// ip_netblock.go for the complete reasoning - this plugin fires
-	// unconditionally on every IPAddress the pipeline touches, so an
-	// ungated Add() here has the identical unbounded-scope-creep risk.
-	if support.HasInScopeFQDN(ctx, e.Session, e.Entity) {
+	// tracker on the conservative "ambiguous" path: admit only if it is
+	// small enough (IPv4, mask /20 or longer) to scan on a weak signal.
+	// This plugin fires on every IPAddress the pipeline touches, so the
+	// previous resolution-based gate (support.HasInScopeFQDN) had the
+	// same unbounded-scope-creep problem as ip_netblock.go - admitting
+	// entire cloud-provider ranges whenever one in-scope name resolved
+	// into them. See the fuller comment at the equivalent site in
+	// ip_netblock.go. Owned blocks of any size still reach scope via
+	// AdmitOwnedNetblock / FinishOwnedNetblockFills (ownership-gated,
+	// not size-gated); individual in-scope-resolving IPs are authorized
+	// independently in dns/ip.go.
+	if support.PrefixEligibleForAmbientAdmit(netblock.CIDR) {
 		e.Session.Scope().Add(netblock)
 	}
 	support.AdmitOwnedNetblock(e, nb)
