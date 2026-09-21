@@ -79,7 +79,8 @@ func (d *dnsIP) check(e *et.Event) error {
 			// is in scope. This is what lets target assets hosted on
 			// shared cloud infrastructure (an in-scope name on an
 			// AWS/Azure IP) be scanned without admitting the provider's
-			// entire netblock. Scope.AddIPAddress matches by exact
+			// entire netblock. Scope.Add (routing to AddIPAddress)
+			// matches an IP by exact
 			// address, so only this one IP is authorized - never its
 			// neighbors, never its CIDR. Fill and sweep key off
 			// Scope().Netblocks(), never Scope().IPAddresses(), so this
@@ -91,13 +92,13 @@ func (d *dnsIP) check(e *et.Event) error {
 			// NOTE (temporary): the log line below is for interim
 			// observability while the netblock resolution-admission
 			// leak still exists on this branch. Until that leak is
-			// removed, AddIPAddress will usually early-return false
+			// removed, that add will usually early-return false
 			// (the IP is already in scope via its leaked netblock), so
 			// this authorization is redundant now and only becomes
 			// load-bearing once the leak is gone. Remove the log line
 			// after the leak-removal change is verified.
 			if fqdnInScope {
-				if e.Session.Scope().AddIPAddress(ip) {
+				if e.Session.Scope().Add(ip) {
 					e.Session.Log().Info("provenance scan authorization: added IP to scope",
 						"ip", ip.Address.String(), "resolved_from", fqdn.Name,
 						slog.Group("plugin", "name", d.plugin.name, "handler", d.name))
