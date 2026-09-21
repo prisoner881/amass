@@ -1,4 +1,4 @@
-// Copyright © by Jeff Foley 2017-2026. All rights reserved.
+// Copyright (c) by Jeff Foley 2017-2026. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -130,24 +130,32 @@ func (d *ipNetblock) store(e *et.Event, entry *sessions.CIDRangerEntry) (*dbt.En
 	}
 
 	// Registers the discovered netblock with the session's live scope
-	// tracker (e.Session.Scope()), not just the database - but only
-	// when the IP that triggered this discovery genuinely traces back
-	// to something already in scope. This plugin fires unconditionally
-	// on every IPAddress the pipeline ever touches, including IPs
-	// resolved from completely out-of-scope, incidentally-discovered
-	// FQDNs (a shared CDN or third-party service some unrelated domain
-	// happens to use). Without this gate, that unconditional firing -
-	// harmless before Scope.Add() actually worked, since nothing read
-	// its result - now means any netblock touched by any IP resolution
-	// anywhere gets permanently registered as in-scope, and every other
-	// IP sharing that (often huge, shared) range becomes in-scope too
-	// via the normal, correct containment check. Confirmed directly
-	// against a real enumeration: this was the complete, actual
-	// mechanism behind Cloudflare/AWS/Azure/Google/GitHub ranges, and
-	// entirely unrelated third-party infrastructure, all ending up
-	// marked in-scope. See support.HasInScopeFQDN for the actual check,
-	// shared with whois/bgptools/netblock.go's identical situation.
-	if support.HasInScopeFQDN(ctx, e.Session, e.Entity) {
+	// tracker (e.Session.Scope()) on the conservative "ambiguous" path:
+	// admit it only if it is small enough (IPv4, mask /20 or longer)
+	// that scanning the whole block on a weak signal is acceptable.
+	//
+	// This plugin fires on every IPAddress the pipeline touches,
+	// including IPs resolved from out-of-scope, incidentally-discovered
+	// FQDNs (shared CDN or third-party infrastructure). The previous
+	// gate here admitted a netblock of ANY size whenever a single
+	// in-scope name merely resolved into it (support.HasInScopeFQDN);
+	// because scope containment then marks every address in the range
+	// in scope, that admitted entire cloud-provider /10s and /11s and
+	// unrelated third-party ranges - confirmed directly against a real
+	// enumeration as the mechanism behind AWS/Azure/Google/Cloudflare
+	// ranges being scanned. The size gate stops that: a large block is
+	// never admitted on this weak, incidental signal.
+	//
+	// Two things preserve the assets we do want. First, a netblock the
+	// target genuinely owns still reaches scope at any size via the
+	// ownership path (AdmitOwnedNetblock below, and the session-end
+	// FinishOwnedNetblockFills re-walk), which is gated on RDAP contact
+	// attribution, not size. Second, an individual IP that an in-scope
+	// FQDN resolves to is authorized for scanning directly and
+	// independently of its enclosing netblock (see the provenance
+	// authorization in dns/ip.go), so declining to scope a large
+	// ambiguous block here does not lose target hosts inside it.
+	if support.PrefixEligibleForAmbientAdmit(netblock.CIDR) {
 		e.Session.Scope().Add(netblock)
 	}
 	support.AdmitOwnedNetblock(e, nb)
