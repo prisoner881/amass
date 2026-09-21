@@ -1,4 +1,4 @@
-// Copyright © by Jeff Foley 2017-2026. All rights reserved.
+// Copyright (c) by Jeff Foley 2017-2026. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -27,7 +27,10 @@ var OwnedNetblockSource = &et.Source{
 
 const (
 	ownedMinPrefixBits = 16
-	ownedFillBatchLog  = 4096
+	// ambientAdmitMinPrefixBits is the smallest mask (largest block)
+	// admitted to scope on the ambiguous path: /20 = 4,096 addresses.
+	ambientAdmitMinPrefixBits = 20
+	ownedFillBatchLog         = 4096
 )
 
 var (
@@ -37,7 +40,10 @@ var (
 // NetblockOwnedBySeed is true when an RDAP contact email on this
 // netblock's IPNetRecord uses a domain in the session seed list.
 // Fail-closed: missing edges, no email, or a cloud/personal mailbox
-// all return false. Existing HasInScopeFQDN admission is unchanged.
+// all return false. This is the ownership signal used by
+// AdmitOwnedNetblock and FinishOwnedNetblockFills; it is independent
+// of the size-gated ambiguous admission in ip_netblock.go and
+// whois/bgptools/netblock.go.
 func NetblockOwnedBySeed(ctx context.Context, session et.Session, nb *dbt.Entity) (bool, string) {
 	if session == nil || nb == nil {
 		return false, ""
@@ -120,6 +126,33 @@ func PrefixEligibleForFill(p netip.Prefix) bool {
 		return false
 	}
 	return p.Bits() >= ownedMinPrefixBits && p.Bits() <= 32
+}
+
+// PrefixEligibleForAmbientAdmit reports whether a netblock is small
+// enough to admit to session scope on the conservative "ambiguous"
+// path - i.e. when we have no strong ownership signal for it (no
+// resolvable RDAP contact, or the registration record has not been
+// enriched yet at admission time). IPv4 with mask /20 or longer
+// (<= 4,096 addresses); IPv6 and anything wider than a /20 are
+// refused. This is deliberately stricter than PrefixEligibleForFill's
+// /16 floor: a /16 we cannot attribute is 65,536 addresses of
+// possibly-shared infrastructure, too large to scan on a weak signal,
+// whereas a genuinely owned block of any size still reaches scope via
+// the ownership path (AdmitOwnedNetblock / FinishOwnedNetblockFills),
+// which is not size-gated. Replaces the previous resolution-based
+// admission (support.HasInScopeFQDN), which admitted a netblock of any
+// size - up to entire cloud-provider /10s and /11s - whenever a single
+// in-scope name merely resolved into it, because scope containment then
+// marked every address in that range in scope. Individual IPs that an
+// in-scope FQDN resolves to are authorized for scanning directly and
+// independently (see the provenance authorization in dns/ip.go), so
+// declining to scope the enclosing block here does not lose those
+// target assets.
+func PrefixEligibleForAmbientAdmit(p netip.Prefix) bool {
+	if !p.IsValid() || p.Addr().Is6() {
+		return false
+	}
+	return p.Bits() >= ambientAdmitMinPrefixBits && p.Bits() <= 32
 }
 
 // AdmitOwnedNetblock adds the CIDR to session scope when the contact
