@@ -1,4 +1,4 @@
-// Copyright © by Jeff Foley 2017-2026. All rights reserved.
+// Copyright (c) by Jeff Foley 2017-2026. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -59,29 +59,63 @@ func (d *dnsIP) check(e *et.Event) error {
 	if len(ips) > 0 {
 		d.process(e, fqdn.Name, ips)
 
+		// Whether the resolving FQDN is itself in scope. Computed once
+		// and reused for both provenance-based scan authorization and
+		// sweep sizing below, which are otherwise independent concerns.
+		fqdnInScope := false
+		if _, conf := e.Session.Scope().IsAssetInScope(fqdn, 0); conf > 0 {
+			fqdnInScope = true
+		}
+
 		for _, v := range ips {
 			ip, ok := v.ip.Asset.(*oamnet.IPAddress)
 			if !ok || ip == nil {
 				continue
 			}
 
+			// Provenance-based scan authorization. An IP that an
+			// in-scope FQDN resolves to is individually authorized for
+			// scanning, independent of whether its enclosing netblock
+			// is in scope. This is what lets target assets hosted on
+			// shared cloud infrastructure (an in-scope name on an
+			// AWS/Azure IP) be scanned without admitting the provider's
+			// entire netblock. Scope.AddIPAddress matches by exact
+			// address, so only this one IP is authorized - never its
+			// neighbors, never its CIDR. Fill and sweep key off
+			// Scope().Netblocks(), never Scope().IPAddresses(), so this
+			// cannot make the block eligible for fill. Always fires
+			// regardless of -rigid: -rigid disables horizontal scope
+			// expansion to new orgs/domains, not the scanning of an IP
+			// that an already-in-scope name resolves to.
+			//
+			// NOTE (temporary): the log line below is for interim
+			// observability while the netblock resolution-admission
+			// leak still exists on this branch. Until that leak is
+			// removed, AddIPAddress will usually early-return false
+			// (the IP is already in scope via its leaked netblock), so
+			// this authorization is redundant now and only becomes
+			// load-bearing once the leak is gone. Remove the log line
+			// after the leak-removal change is verified.
+			if fqdnInScope {
+				if e.Session.Scope().AddIPAddress(ip) {
+					e.Session.Log().Info("provenance scan authorization: added IP to scope",
+						"ip", ip.Address.String(), "resolved_from", fqdn.Name,
+						slog.Group("plugin", "name", d.plugin.name, "handler", d.name))
+				}
+			}
+
+			// Sweep sizing. Deliberately driven by FQDN-based scope
+			// only, not IP/Netblock-based scope. Coupling sweep
+			// aggressiveness to netblock membership would mean any
+			// target using shared cloud infrastructure could trigger a
+			// 250-address active sweep of unrelated third-party hosts
+			// sharing that same range - a real scope-boundary risk, not
+			// just a performance concern. Independent of the
+			// authorization above: authorization permits one resolved
+			// IP; sweep expands to neighbors, which are not authorized
+			// here and must earn their own provenance to be scanned.
 			var size int
-			// Sweep sizing is deliberately driven by FQDN-based scope
-			// only, not IP/Netblock-based scope - even after the
-			// Scope.AddNetblock() fix (see ip_netblock.go and
-			// bgptools/netblock.go), which makes this IP-based scope
-			// check correctly succeed for IPs within a discovered,
-			// in-scope netblock. Coupling sweep aggressiveness to
-			// netblock membership would mean any target using shared
-			// cloud infrastructure (AWS/Azure ranges get added to scope
-			// regardless of -rigid) could trigger a 250-address active
-			// sweep of unrelated third-party hosts sharing that same
-			// range - a real scope-boundary risk, not just a
-			// performance concern. This deliberately preserves the
-			// conservative, firstSweepSize-only behavior already in
-			// effect (if accidentally, prior to the scope fix)
-			// throughout this project's history.
-			if _, conf := e.Session.Scope().IsAssetInScope(fqdn, 0); conf > 0 {
+			if fqdnInScope {
 				size = d.plugin.firstSweepSize
 			}
 			if size > 0 {
