@@ -1,4 +1,4 @@
-// Copyright © by Jeff Foley 2017-2026. All rights reserved.
+// Copyright (c) by Jeff Foley 2017-2026. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"regexp"
 	"strings"
 	"time"
 
@@ -41,6 +42,31 @@ import (
 // name alone with no parent-product scoping - a bare version string
 // would risk colliding across unrelated products that happen to share
 // a version number.
+// ngVersionRE extracts the version from Angular's ng-version DOM
+// attribute, e.g. <app-root ng-version="19.2.10">. This attribute is
+// Angular (2+) framework's own signature and is present in server-side
+// rendered / prerendered output. It is the ONLY reliable source of the
+// Angular version here, because the wappalyzergo library never evaluates
+// its Angular fingerprint: Angular is defined in the signature data with
+// only "js" and "dom" match rules, both of which require a JavaScript
+// runtime / DOM evaluation that the static (body + headers) analyzer
+// does not perform. As a result wappalyzergo detects modern Angular
+// neither with a version nor at all from captured HTTP responses. This
+// extraction recovers both the product and its version from the raw
+// output we already have, and routes them through the same storeProduct
+// / storeRelease path a native detection would use, so the stored
+// entities are indistinguishable from library-produced ones.
+//
+// angularProductName must match wappalyzergo's exact product name for
+// Angular so that, if a future library version does detect it, this
+// supplement dedups onto the same Product entity rather than creating a
+// divergent one. Verified against the signature data: the name is
+// exactly "Angular" (distinct from "AngularJS", "Angular Material",
+// etc., none of which use ng-version).
+var ngVersionRE = regexp.MustCompile(`(?i)ng-version="([0-9]+(?:\.[0-9]+)*)"`)
+
+const angularProductName = "Angular"
+
 type techStack struct {
 	name   string
 	log    *slog.Logger
@@ -120,10 +146,18 @@ func (ts *techStack) check(e *et.Event) error {
 func (ts *techStack) detect(e *et.Event, serv *oamplat.Service) {
 	info := ts.client.FingerprintWithInfo(serv.Attributes, []byte(serv.Output))
 
+	// Track whether the library already emitted Angular, so the
+	// ng-version supplement below does not double-process it if a future
+	// wappalyzergo version gains static Angular detection.
+	angularSeen := false
+
 	for key, appInfo := range info {
 		techName, version := splitVersion(key)
 		if techName == "" {
 			continue
+		}
+		if techName == angularProductName {
+			angularSeen = true
 		}
 
 		productEntity := ts.storeProduct(e, serv, techName, version, appInfo)
@@ -134,6 +168,37 @@ func (ts *techStack) detect(e *et.Event, serv *oamplat.Service) {
 		if version != "" {
 			ts.storeRelease(e, serv, productEntity, techName, version)
 		}
+	}
+
+	ts.detectAngular(e, serv, angularSeen)
+}
+
+// detectAngular recovers modern Angular and its version from the
+// ng-version DOM attribute in the captured output, which wappalyzergo
+// cannot do (see ngVersionRE). It runs only when the library did not
+// already report Angular, and stores through the same storeProduct /
+// storeRelease path as a native detection so the result is
+// indistinguishable from library-produced entities. A zero-value
+// AppInfo is passed intentionally: a DOM-only detection carries no
+// category, description, or icon, exactly as the library would report
+// for a match with no such metadata.
+func (ts *techStack) detectAngular(e *et.Event, serv *oamplat.Service, angularSeen bool) {
+	if angularSeen {
+		return
+	}
+
+	m := ngVersionRE.FindStringSubmatch(serv.Output)
+	if m == nil {
+		return
+	}
+	version := m[1]
+
+	productEntity := ts.storeProduct(e, serv, angularProductName, version, wappalyzer.AppInfo{})
+	if productEntity == nil {
+		return
+	}
+	if version != "" {
+		ts.storeRelease(e, serv, productEntity, angularProductName, version)
 	}
 }
 
