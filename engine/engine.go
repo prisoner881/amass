@@ -1,4 +1,4 @@
-// Copyright © by Jeff Foley 2017-2026. All rights reserved.
+// Copyright (c) by Jeff Foley 2017-2026. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"time"
 
 	_ "net/http/pprof"
@@ -39,6 +40,8 @@ func NewEngine(l *slog.Logger) (*Engine, error) {
 	if l == nil {
 		l = slog.New(slog.NewTextHandler(os.Stdout, nil))
 	}
+
+	logBuildInfo(l)
 
 	reg := registry.NewRegistry(l)
 	mgr := sessions.NewManager(l, reg)
@@ -88,6 +91,60 @@ func NewEngine(l *slog.Logger) (*Engine, error) {
 		Manager:    mgr,
 		Server:     srv,
 	}, nil
+}
+
+// depVersions lists the module paths reported in the engine startup
+// build-info banner. Add a module here to surface its compiled-in
+// version at boot. Versions come from runtime/debug.ReadBuildInfo(),
+// which reads what is actually baked into this binary, so the banner
+// cannot drift out of sync with go.mod the way a hardcoded string would.
+var depVersions = []string{
+	"github.com/projectdiscovery/wappalyzergo",
+	"github.com/owasp-amass/resolve",
+	"github.com/owasp-amass/asset-db",
+	"github.com/owasp-amass/open-asset-model",
+}
+
+// logBuildInfo emits a single startup line recording this engine's own
+// build revision and the versions of a few key dependencies, read from
+// the binary's embedded build info. It answers "is this running engine
+// actually the code and dependencies I think it is?" without needing to
+// inspect go.mod or the image. Best-effort: if build info is
+// unavailable (e.g. built without module info), it logs what it can.
+func logBuildInfo(l *slog.Logger) {
+	attrs := []any{}
+
+	bi, ok := debug.ReadBuildInfo()
+	if !ok {
+		l.Info("engine build info unavailable")
+		return
+	}
+
+	// Amass' own version and VCS revision, when present.
+	if bi.Main.Version != "" {
+		attrs = append(attrs, "amass_version", bi.Main.Version)
+	}
+	for _, s := range bi.Settings {
+		switch s.Key {
+		case "vcs.revision":
+			attrs = append(attrs, "vcs_revision", s.Value)
+		case "vcs.modified":
+			attrs = append(attrs, "vcs_modified", s.Value)
+		}
+	}
+
+	// Selected dependency versions.
+	want := make(map[string]bool, len(depVersions))
+	for _, p := range depVersions {
+		want[p] = true
+	}
+	for _, dep := range bi.Deps {
+		if want[dep.Path] {
+			attrs = append(attrs, dep.Path, dep.Version)
+		}
+	}
+
+	l.Info("engine build info", attrs...)
 }
 
 func (e *Engine) Shutdown() {
