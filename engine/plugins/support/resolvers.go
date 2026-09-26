@@ -94,7 +94,7 @@ var trusted *pool.Pool
 var detector *wildcards.Detector
 
 func PerformQuery(ctx context.Context, name string, qtype uint16) ([]dns.RR, error) {
-	for i := 1; i <= 10; i++ {
+	for i := 1; i <= 6; i++ {
 		msg := utils.QueryMsg(name, qtype)
 		if qtype == dns.TypePTR {
 			msg = utils.ReverseMsg(name)
