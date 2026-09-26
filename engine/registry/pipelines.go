@@ -1,4 +1,4 @@
-// Copyright © by Jeff Foley 2017-2026. All rights reserved.
+// Copyright (c) by Jeff Foley 2017-2026. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 // SPDX-License-Identifier: Apache-2.0
 
@@ -39,11 +39,35 @@ func init() {
 func (r *registry) BuildAssetPipeline(ctx context.Context, atype oam.AssetType) (*et.AssetPipeline, error) {
 	var stages []pipeline.Stage
 
+	// OSINT bypass (FQDN pipeline only): discovered names skip the
+	// subdomain-OSINT positions and resume at the first FQDN stage after
+	// fqdnOSINTLast (HTTP probing). Compute that resume stage id before
+	// the build loop; if nothing is registered after fqdnOSINTLast, leave
+	// it empty and the gate is not inserted. See osint_bypass.go.
+	resumeID := ""
+	if atype == oam.FQDN {
+		r.assertOSINTBypassInvariant(atype)
+		for p := fqdnOSINTLast + 1; p <= 50; p++ {
+			if len(r.handlers[atype][p]) > 0 {
+				resumeID = fmt.Sprintf("%s - Priority: %d", atype, p)
+				break
+			}
+		}
+	}
+	bypassInserted := false
+
 	bufsize := 1
 	for priority := 1; priority <= 50; priority++ {
 		handlers, found := r.handlers[atype][priority]
 		if !found || len(handlers) == 0 {
 			continue
+		}
+
+		// Insert the OSINT bypass once, immediately before the first
+		// position at or beyond fqdnOSINTFirst that actually has handlers.
+		if atype == oam.FQDN && resumeID != "" && !bypassInserted && priority >= fqdnOSINTFirst {
+			stages = append(stages, newOSINTBypass(resumeID))
+			bypassInserted = true
 		}
 
 		id := fmt.Sprintf("%s - Priority: %d", atype, priority)
@@ -115,6 +139,68 @@ func sendElementOnExit(ede *et.EventDataElement) {
 	// A later completedCallback Ack of the same row is a no-op.
 	if ede.Event != nil && ede.Event.Session != nil && ede.Event.Entity != nil {
 		_ = ede.Event.Session.Backlog().Ack(ede.Event.Entity, false)
+	}
+}
+
+// osintBypassSkippable lists the FQDN handler names permitted in the OSINT
+// bypass range [fqdnOSINTFirst, fqdnOSINTLast]. Every handler in that
+// range MUST return immediately for a discovered (non-in-scope-SLD) name,
+// because the bypass routes such names around the entire range. A handler
+// that does useful work for discovered names would be silently skipped for
+// them, degrading collection with no error. When a new OSINT plugin lands
+// in this range, add its handler name here after confirming its callback
+// gates on support.HasSLDInScope (or otherwise no-ops for discovered
+// names). Handler names are "<plugin source name>-Handler" per each
+// plugin's RegisterHandler call.
+var osintBypassSkippable = map[string]bool{
+	"BinaryEdge-Handler":      true,
+	"Chaos-Handler":           true,
+	"AlienVault-Handler":      true,
+	"CertSpotter-Handler":     true,
+	"crt.sh-Handler":          true,
+	"DNSRepo-Handler":         true,
+	"Grep.App-Handler":        true,
+	"CommonCrawl-Handler":     true,
+	"DNSDumpster-Handler":     true,
+	"HackerTarget-Handler":    true,
+	"IP-THC-FQDN-Handler":     true,
+	"SubdomainCenter-Handler": true,
+	"URLScan-FQDN-Handler":    true,
+	"LeakIX-Handler":          true,
+	"PassiveTotal-Handler":    true,
+	"Prospeo-Handler":         true,
+	"SecurityTrails-Handler":  true,
+	"VirusTotal-Handler":      true,
+	"ZETAlytics-Handler":      true,
+	"DNSHistory-Handler":      true,
+	"RapidDNS-Handler":        true,
+	"SiteDossier-Handler":     true,
+}
+
+// assertOSINTBypassInvariant panics at pipeline-build time if any FQDN
+// handler registered in the bypass range is not on the skippable
+// allow-list. This converts a silent, four-hours-into-a-run degradation
+// (a discovered name dropped from a stage it needed) into a loud,
+// immediate build failure the moment an unvetted handler is added to the
+// range. Panicking here is appropriate: a misconfigured pipeline should
+// not start.
+func (r *registry) assertOSINTBypassInvariant(atype oam.AssetType) {
+	for p := fqdnOSINTFirst; p <= fqdnOSINTLast; p++ {
+		for _, h := range r.handlers[atype][p] {
+			if h == nil {
+				continue
+			}
+			if !osintBypassSkippable[h.Name] {
+				panic(fmt.Sprintf(
+					"OSINT bypass invariant violated: FQDN handler %q at position %d "+
+						"is in the bypass range [%d,%d] but is not on the skippable "+
+						"allow-list. A discovered name would be silently skipped past "+
+						"this handler. If it correctly no-ops for names without "+
+						"HasSLDInScope, add it to osintBypassSkippable; otherwise it "+
+						"must not live in this position range. See osint_bypass.go.",
+					h.Name, p, fqdnOSINTFirst, fqdnOSINTLast))
+			}
+		}
 	}
 }
 
