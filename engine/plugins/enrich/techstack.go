@@ -180,8 +180,8 @@ func (ts *techStack) detect(e *et.Event, serv *oamplat.Service) {
 // storeRelease path as a native detection so the result is
 // indistinguishable from library-produced entities. A zero-value
 // AppInfo is passed intentionally: a DOM-only detection carries no
-// category, description, or icon, exactly as the library would report
-// for a match with no such metadata.
+// category, description, icon, website, or CPE, exactly as the library
+// would report for a match with no such metadata.
 func (ts *techStack) detectAngular(e *et.Event, serv *oamplat.Service, angularSeen bool) {
 	if angularSeen {
 		return
@@ -247,16 +247,26 @@ func (ts *techStack) storeProduct(e *et.Event, serv *oamplat.Service, techName, 
 	_, _ = e.Session.DB().CreateEntityProperty(ctx, productEntity, src)
 	_, _ = e.Session.DB().CreateEdgeProperty(ctx, edge, src)
 
-	// Raw filename only (e.g. "WordPress.svg") - not a resolvable link.
-	// A separate, external process is expected to resolve this to a
-	// real local asset and update this property in place later.
-	if appInfo.Icon != "" {
+	// Product has no columns for these. Icon is a raw filename only
+	// (e.g. "WordPress.svg"), not a resolvable link. A separate process
+	// is expected to resolve it to a local asset and update that
+	// property in place later. Website and CPE are stored the same way.
+	// Empty values are skipped: CPE is unset on most fingerprints, and
+	// the Angular supplement passes a zero AppInfo.
+	for _, prop := range []struct{ name, value string }{
+		{"icon", appInfo.Icon},
+		{"website", appInfo.Website},
+		{"cpe", appInfo.CPE},
+	} {
+		if prop.value == "" {
+			continue
+		}
 		if _, err := e.Session.DB().CreateEntityProperty(ctx, productEntity, &general.SimpleProperty{
-			PropertyName:  "icon",
-			PropertyValue: appInfo.Icon,
+			PropertyName:  prop.name,
+			PropertyValue: prop.value,
 		}); err != nil {
-			ts.log.Warn("failed to store icon property",
-				"product", techName, "icon", appInfo.Icon, "asset", serv.ID, "error", err.Error())
+			ts.log.Warn("failed to store product property",
+				"product", techName, "property", prop.name, "asset", serv.ID, "error", err.Error())
 		}
 	}
 
