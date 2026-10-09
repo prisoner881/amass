@@ -184,6 +184,12 @@ func (pp *protocolProbes) check(e *et.Event) error {
 		return nil
 	}
 
+	// Private, loopback and other non-routable addresses are never
+	// probed (see support.IsNonRoutableAddress).
+	if support.IsNonRoutableAddress(ip.Address) {
+		return nil
+	}
+
 	if _, conf := e.Session.Scope().IsAssetInScope(e.Entity.Asset, 0); conf <= 0 {
 		return nil
 	}
