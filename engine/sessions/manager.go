@@ -84,11 +84,13 @@ func (r *manager) CancelSession(id uuid.UUID) {
 		return
 	}
 
-	r.RLock()
-	hook := r.shutdownHook
-	r.RUnlock()
-	r.runHookOnce(id, s, hook)
-
+	// The session-end hook is deliberately NOT run here. CancelSession is
+	// the path taken by TerminateSession, Ctrl-C in the CLI and engine
+	// shutdown; an operator stopping a run expects work to stop, not for
+	// owned-netblock fills and the Protocol-Probes sweep to start (and
+	// block Kill() for hours). The hook runs only through RunEndWork. If
+	// RunEndWork is still in progress, Kill() below makes the hook's
+	// s.Done() checks return early.
 	s.Kill()
 
 	r.Lock()
@@ -115,29 +117,30 @@ func (r *manager) CancelSession(id uuid.UUID) {
 // RunEndWork executes the session-end hook without destroying the
 // session. Enum uses this after first-pass idle so fill/sweep work
 // shows up in /stats; a later idle is the real completion signal.
+// Only the first call for a session runs the hook; later calls (repeated
+// POST /end-work requests, CLI retries) return immediately instead of
+// parking a goroutine for the hook's full duration.
 func (r *manager) RunEndWork(id uuid.UUID) {
 	s := r.GetSession(id)
 	if s == nil {
 		return
 	}
+	if _, started := r.endWork.LoadOrStore(id, true); started {
+		return
+	}
+
 	r.RLock()
 	hook := r.shutdownHook
 	r.RUnlock()
-	r.runHookOnce(id, s, hook)
+	if hook != nil {
+		hook(s)
+	}
 	r.endWorkDone.Store(id, true)
 }
 
 func (r *manager) EndWorkDone(id uuid.UUID) bool {
 	v, ok := r.endWorkDone.Load(id)
 	return ok && v.(bool)
-}
-
-func (r *manager) runHookOnce(id uuid.UUID, s et.Session, hook func(et.Session)) {
-	if hook == nil || s == nil {
-		return
-	}
-	once, _ := r.endWork.LoadOrStore(id, &sync.Once{})
-	once.(*sync.Once).Do(func() { hook(s) })
 }
 
 func (r *manager) GetSessions() []et.Session {

@@ -34,7 +34,7 @@ const (
 // Must be called while the session context and dispatcher pump are
 // still alive — before Session.Kill().
 func SweepMissedIPs(s et.Session, d et.Dispatcher) {
-	if s == nil || d == nil || s.Backlog() == nil {
+	if s == nil || d == nil || s.Backlog() == nil || s.Done() {
 		return
 	}
 	if !s.Config().Active {
@@ -91,6 +91,12 @@ func SweepMissedIPs(s et.Session, d et.Dispatcher) {
 
 	var submitted int
 	for _, id := range walk {
+		// The session was terminated while end-work was running: stop
+		// requeueing instead of walking the rest of the Done list.
+		if s.Done() {
+			log.Info("session ended during sweep; stopping requeue")
+			return
+		}
 		if submitted >= sweepMaxResubmit {
 			log.Warn("sweep cap reached", "cap", sweepMaxResubmit)
 			break

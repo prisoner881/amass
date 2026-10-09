@@ -202,6 +202,9 @@ func FinishOwnedNetblockFills(s et.Session, d et.Dispatcher) {
 	SetEndWorkPhase(s, "owned-fill")
 
 	for _, n := range s.Scope().Netblocks() {
+		if s.Done() {
+			return
+		}
 		if n == nil || !PrefixEligibleForFill(n.CIDR) {
 			continue
 		}

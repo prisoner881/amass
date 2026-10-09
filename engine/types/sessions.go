@@ -156,17 +156,18 @@ type SessionManager interface {
 	NewSession(cfg *config.Config) (Session, error)
 	AddSession(s Session) error
 	CancelSession(id uuid.UUID)
-	// RunEndWork runs the shutdown hook without Kill() so first-pass
+	// RunEndWork runs the session-end hook without Kill() so first-pass
 	// idle can trigger owned-netblock fill and the Protocol-Probes
-	// sweep while stats still work. CancelSession still runs the hook
-	// again (idempotent) before tearing the session down.
+	// sweep while stats still work. Only the first call per session runs
+	// the hook; later calls return immediately.
 	RunEndWork(id uuid.UUID)
 	EndWorkDone(id uuid.UUID) bool
 	GetSession(id uuid.UUID) Session
 	GetSessions() []Session
-	// SetShutdownHook registers a callback invoked at the start of
-	// CancelSession, before Kill(), while the session context and
-	// dispatcher pump are still alive. One hook; last writer wins.
+	// SetShutdownHook registers the session-end callback run by
+	// RunEndWork. It is not run by CancelSession or engine shutdown, so
+	// stopping a session never starts more work. One hook; last writer
+	// wins.
 	SetShutdownHook(fn func(Session))
 	Shutdown()
 }
