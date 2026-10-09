@@ -4,7 +4,17 @@
 
 package registry
 
-import "testing"
+import (
+	"context"
+	"testing"
+
+	"github.com/caffix/pipeline"
+	"github.com/caffix/queue"
+	"github.com/owasp-amass/amass/v5/engine/plugins/support"
+	et "github.com/owasp-amass/amass/v5/engine/types"
+	dbt "github.com/owasp-amass/asset-db/types"
+	oamdns "github.com/owasp-amass/open-asset-model/dns"
+)
 
 // TestNameIsExactScopeDomain covers the exact-domain membership test the
 // OSINT bypass uses to decide whether a name takes the normal OSINT path
@@ -19,16 +29,16 @@ func TestNameIsExactScopeDomain(t *testing.T) {
 		want    bool
 	}{
 		{"example.com", []string{"example.com"}, true},
-		{"Example.COM", []string{"example.com"}, true},                       // case-insensitive
-		{"example.com", []string{"EXAMPLE.COM"}, true},                       // case-insensitive both sides
-		{"  example.com  ", []string{"example.com"}, true},                   // trimmed
-		{"www.example.com", []string{"example.com"}, false},                  // subdomain, not configured
+		{"Example.COM", []string{"example.com"}, true},                        // case-insensitive
+		{"example.com", []string{"EXAMPLE.COM"}, true},                        // case-insensitive both sides
+		{"  example.com  ", []string{"example.com"}, true},                    // trimmed
+		{"www.example.com", []string{"example.com"}, false},                   // subdomain, not configured
 		{"www.example.com", []string{"example.com", "www.example.com"}, true}, // overlapping-domain fix
-		{"notexample.com", []string{"example.com"}, false},                   // suffix trap
-		{"*.apps.example.com", []string{"example.com"}, false},               // wildcard label
-		{"", []string{"example.com"}, false},                                 // empty name
-		{"example.com", nil, false},                                          // no configured domains
-		{"example.com", []string{}, false},                                   // empty domain list
+		{"notexample.com", []string{"example.com"}, false},                    // suffix trap
+		{"*.apps.example.com", []string{"example.com"}, false},                // wildcard label
+		{"", []string{"example.com"}, false},                                  // empty name
+		{"example.com", nil, false},                                           // no configured domains
+		{"example.com", []string{}, false},                                    // empty domain list
 	}
 
 	for _, c := range cases {
@@ -75,5 +85,57 @@ func TestFQDNOSINTRangeSane(t *testing.T) {
 	}
 	if fqdnOSINTFirst > fqdnOSINTLast {
 		t.Errorf("fqdnOSINTFirst=%d > fqdnOSINTLast=%d", fqdnOSINTFirst, fqdnOSINTLast)
+	}
+}
+
+type bypassTestParams struct {
+	reg pipeline.StageRegistry
+}
+
+func (p *bypassTestParams) Pipeline() *pipeline.Pipeline     { return nil }
+func (p *bypassTestParams) Registry() pipeline.StageRegistry { return p.reg }
+
+// TestOSINTBypassRouting checks the gate's routing decision. A name that
+// Known-FQDN flagged with HasSLDInScope (a scope domain added at runtime,
+// so absent from Config().Domains()) must continue into OSINT. An
+// unflagged discovered name must be handed to the resume stage instead.
+func TestOSINTBypassRouting(t *testing.T) {
+	const resumeID = "FQDN - Priority: 41"
+
+	cases := []struct {
+		name       string
+		sldInScope bool
+		wantOSINT  bool
+	}{
+		{"horizontal.net", true, true},    // runtime scope domain flagged by Known-FQDN
+		{"www.example.com", false, false}, // discovered name, no flag
+	}
+
+	for _, c := range cases {
+		ev := &et.Event{
+			Name:   c.name,
+			Entity: &dbt.Entity{Asset: &oamdns.FQDN{Name: c.name}},
+		}
+		if c.sldInScope {
+			support.AddSLDInScope(ev)
+		}
+
+		q := queue.NewQueue()
+		tp := &bypassTestParams{reg: pipeline.StageRegistry{resumeID: q}}
+
+		out, err := osintBypassTask(resumeID).Process(context.Background(), et.NewEventDataElement(ev), tp)
+		if err != nil {
+			t.Fatalf("%s: unexpected error: %v", c.name, err)
+		}
+		if gotOSINT := out != nil; gotOSINT != c.wantOSINT {
+			t.Errorf("%s: continued into OSINT = %v, want %v", c.name, gotOSINT, c.wantOSINT)
+		}
+		wantQueued := 0
+		if !c.wantOSINT {
+			wantQueued = 1
+		}
+		if q.Len() != wantQueued {
+			t.Errorf("%s: resume queue length = %d, want %d", c.name, q.Len(), wantQueued)
+		}
 	}
 }

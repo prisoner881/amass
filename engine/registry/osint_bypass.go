@@ -32,7 +32,8 @@ const (
 
 // newOSINTBypass builds the FIFO gate that lets discovered (non-seed)
 // FQDNs skip the subdomain-OSINT positions (fqdnOSINTFirst..fqdnOSINTLast)
-// and resume at the given stage id (HTTP probing). Scope domains keep the
+// and resume at the given stage id (HTTP probing). Configured domains and
+// scope domains flagged by Known-FQDN (support.HasSLDInScope) keep the
 // existing path through OSINT unchanged.
 //
 // The gate exists because those OSINT positions include one-name-wide
@@ -43,7 +44,13 @@ const (
 // range removes that head-of-line blocking without changing what any
 // plugin collects.
 func newOSINTBypass(resumeID string) pipeline.Stage {
-	return pipeline.FIFO("FQDN - OSINT bypass", pipeline.TaskFunc(
+	return pipeline.FIFO("FQDN - OSINT bypass", osintBypassTask(resumeID))
+}
+
+// osintBypassTask is the gate's routing logic, separate from the FIFO
+// stage wrapper so it can be exercised directly in tests.
+func osintBypassTask(resumeID string) pipeline.TaskFunc {
+	return pipeline.TaskFunc(
 		func(ctx context.Context, data pipeline.Data, tp pipeline.TaskParams) (pipeline.Data, error) {
 			ede, ok := data.(*et.EventDataElement)
 			if !ok || ede == nil || ede.Event == nil {
@@ -70,6 +77,17 @@ func newOSINTBypass(resumeID string) pipeline.Stage {
 				return data, nil
 			}
 
+			// A scope domain added at runtime (horizontals, a TLS
+			// certificate CN, a DomainRecord) is not in Config().Domains(),
+			// but Known-FQDN has already flagged it with HasSLDInScope.
+			// Every OSINT handler in the range queries exactly these
+			// names, so they must take the OSINT path as well; routing
+			// them around it would silently drop all subdomain OSINT for
+			// domains discovered during the run.
+			if support.HasSLDInScope(ede.Event) {
+				return data, nil
+			}
+
 			// Discovered name: append the SAME event pointer to the
 			// resume stage's data queue and do not forward it into OSINT.
 			// EventDataElement.Clone returns the same pointer, and HTTP
@@ -86,7 +104,7 @@ func newOSINTBypass(resumeID string) pipeline.Stage {
 			// would leave its backlog row leased forever, so forward it.
 			return data, nil
 		},
-	))
+	)
 }
 
 // exactScopeDomain reports whether the event's FQDN is one of the domains
