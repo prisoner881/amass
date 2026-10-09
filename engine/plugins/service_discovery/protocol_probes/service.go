@@ -6,7 +6,6 @@ package protocol_probes
 
 import (
 	"context"
-	"strings"
 	"time"
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
@@ -20,9 +19,9 @@ import (
 // ProductRelease entities, deliberately matching the exact conventions
 // already established in engine/plugins/enrich/techstack.go: Product
 // entities stay coarse (one canonical entity per technology name,
-// shared across every Service that uses it, keyed by
-// support.Hash64Hex on the lowercased name - the same construction
-// already used there), and ProductRelease names embed the product name
+// shared across every Service that uses it, keyed by support.ProductID -
+// the same construction used there), and ProductRelease names
+// (support.ProductReleaseName) embed the product name
 // rather than a bare version string, since ProductRelease dedups
 // globally by name with no parent-product scoping - a bare version
 // would risk colliding across unrelated products that happen to share
@@ -61,10 +60,8 @@ func storeProduct(e *et.Event, svcEntity *dbt.Entity, src *et.Source, vendor, te
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 10*time.Second)
 	defer cancel()
 
-	id := techName + "-" + support.Hash64Hex(strings.ToLower(techName))
-
-	productEntity, err := e.Session.DB().CreateAsset(ctx, &oamplat.Product{
-		ID:          id,
+	productEntity, err := support.CreateProductAsset(ctx, e.Session, techName, &oamplat.Product{
+		ID:          support.ProductID(techName),
 		Name:        techName,
 		Type:        "software",
 		Category:    vendor,
@@ -94,9 +91,7 @@ func storeRelease(e *et.Event, svcEntity *dbt.Entity, src *et.Source, productEnt
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 10*time.Second)
 	defer cancel()
 
-	releaseEntity, err := e.Session.DB().CreateAsset(ctx, &oamplat.ProductRelease{
-		Name: techName + " " + version,
-	})
+	releaseEntity, err := support.CreateProductReleaseAsset(ctx, e.Session, techName, version)
 	if err != nil || releaseEntity == nil {
 		return
 	}

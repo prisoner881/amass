@@ -351,11 +351,14 @@ func (pp *protocolProbes) storeServiceAndIdentify(e *et.Event, addr string, port
 	// sake of a storage-only concern.
 	storableBanner := strings.ReplaceAll(banner, "\x00", "")
 
-	svcEntity, err := FindOrCreateService(e, e.Entity, addr, port, svcType, storableBanner)
+	svcEntity, portEdge, err := FindOrCreateService(e, e.Entity, addr, port, svcType, storableBanner)
 	if err != nil {
 		pp.log.Warn("failed to store the Service asset", "addr", addr, "port", port, "error", err.Error())
 		return
 	}
+	// Deferred so the event goes out after any Product/ProductRelease
+	// below has been stored.
+	defer announceService(e, svcEntity, portEdge)
 
 	res := IdentifyBanner(banner, dbNames...)
 	pp.logIdentifyResult(addr, port, banner, dbNames, res)
