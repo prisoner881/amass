@@ -17,7 +17,7 @@ import (
 )
 
 // missListSQL is the batch equivalent of the serial walk's filters:
-// ListDone ∩ seed dns_record ∩ open_port (prefilter TTL) ∩ ¬Protocol-Probes
+// ListDone ∩ scope-domain dns_record ∩ open_port (prefilter TTL) ∩ ¬Protocol-Probes
 // (plugin TTL). Does not use fqdn_by_domains — that function is not in
 // stock asset-db. reverse_fqdn prefix match is the same predicate.
 const missListSQL = `
@@ -82,10 +82,7 @@ func missListBatch(s et.Session, doneIDs []string, prefilterSince, protoSince ti
 	if len(doneIDs) == 0 {
 		return nil, true, nil
 	}
-	var seeds []string
-	if s.Config() != nil {
-		seeds = s.Config().Domains()
-	}
+	seeds := sweepSeedDomains(s)
 	if len(seeds) == 0 {
 		return nil, true, nil
 	}

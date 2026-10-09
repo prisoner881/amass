@@ -6,6 +6,7 @@ package protocol_probes
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
@@ -27,7 +28,8 @@ const (
 // It runs only against IPs that this session already processed
 // (backlog state=done), that have open_port tags, that have no
 // Protocol-Probes last_monitored mark inside the transform TTL, and
-// that resolve from an FQDN in the seed-domain scope. Those are the
+// that resolve from an FQDN under a configured domain or a domain added
+// to the session scope during the run (see seedScopedIP). Those are the
 // hosts that hit position 43 with an empty port list, or that were
 // scanned only from the FQDN pipeline.
 //
@@ -162,6 +164,14 @@ func SweepMissedIPs(s et.Session, d et.Dispatcher) {
 	support.SetEndWorkPhase(s, "done")
 }
 
+// seedScopedIP reports whether a name under one of the session's scope
+// domains resolves to ent. That is a configured domain (including a
+// configured subdomain, which the session scope does not store because it
+// keeps registered domains only) or a domain added to the session scope
+// during the run, for example by horizontal expansion. Runtime additions
+// only exist when -rigid is off, and every candidate must already carry a
+// fresh open_port tag, so this never selects a host that was not already
+// scanned in this session.
 func seedScopedIP(s et.Session, ent *dbt.Entity) bool {
 	ctx, cancel := context.WithTimeout(s.Ctx(), 5*time.Second)
 	defer cancel()
@@ -170,8 +180,39 @@ func seedScopedIP(s et.Session, ent *dbt.Entity) bool {
 		if s.Config().IsDomainInScope(fqdn.Name) {
 			return true
 		}
+		if _, conf := s.Scope().IsAssetInScope(fqdn, 0); conf > 0 {
+			return true
+		}
 	}
 	return false
+}
+
+// sweepSeedDomains returns the configured domains plus the domains in the
+// session scope, lowercased and de-duplicated, for the batch miss-list
+// query. It is the batch equivalent of seedScopedIP's two checks.
+func sweepSeedDomains(s et.Session) []string {
+	var all []string
+	if cfg := s.Config(); cfg != nil {
+		all = append(all, cfg.Domains()...)
+	}
+	if sc := s.Scope(); sc != nil {
+		all = append(all, sc.Domains()...)
+	}
+
+	seen := make(map[string]struct{}, len(all))
+	var domains []string
+	for _, d := range all {
+		d = strings.ToLower(strings.TrimSpace(d))
+		if d == "" {
+			continue
+		}
+		if _, dup := seen[d]; dup {
+			continue
+		}
+		seen[d] = struct{}{}
+		domains = append(domains, d)
+	}
+	return domains
 }
 
 func waitIPIdle(s et.Session, timeout time.Duration) bool {
