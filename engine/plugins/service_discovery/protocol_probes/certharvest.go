@@ -9,6 +9,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"errors"
+	"fmt"
 	"net"
 	"strconv"
 	"time"
@@ -40,11 +41,13 @@ import (
 // keeping the source attribution separate preserves that provenance.
 var harvestSource = &et.Source{Name: "Protocol-Probes", Confidence: 80}
 
-// HarvestCertificate is the entry point: ensure a Service entity exists
-// for this host:port, skip entirely if a certificate was already
-// harvested for it (the dedup guard - this is what avoids redundant
-// work against ports http_probes already covers, typically 443), and
-// otherwise perform the handshake and store whatever chain comes back.
+// HarvestCertificate is the entry point: skip entirely if the Service
+// for this host:port already has a harvested certificate (the dedup
+// guard - this is what avoids redundant work against ports http_probes
+// already covers, typically 443), otherwise perform the handshake and,
+// only when it succeeds, create the "tls" Service and store the chain.
+// A port that is merely silent (RDP, databases, tcpwrapped, decoys) and
+// fails the handshake produces no Service at all.
 //
 // addr is deliberately the bare IP address, not a host:port string -
 // FindOrCreateService (via support.ServiceWithIdentifier) appends the
@@ -71,19 +74,17 @@ var harvestSource = &et.Source{Name: "Protocol-Probes", Confidence: 80}
 // amassnet.NewDialContext's plain, direct dialer, the only option this
 // branch has available today.
 func HarvestCertificate(e *et.Event, dial amassnet.DialContext, parent *dbt.Entity, addr string, port int, timeout time.Duration) error {
-	svcEntity, err := FindOrCreateService(e, parent, addr, port, "tls", "")
-	if err != nil {
-		return err
-	}
-
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 5*time.Second)
 	defer cancel()
 
-	existing, err := e.Session.DB().OutgoingEdges(ctx, svcEntity, time.Time{}, "certificate")
-	if err == nil && len(existing) > 0 {
-		// Already harvested - by http_probes, or by a prior run of this
-		// same harvester. Nothing further to do.
-		return nil
+	serv := support.ServiceWithIdentifier(addr, "tcp", port)
+	if existingSvc, _ := findExistingServiceByUniqueID(ctx, e, serv.ID); existingSvc != nil {
+		existing, err := e.Session.DB().OutgoingEdges(ctx, existingSvc, time.Time{}, "certificate")
+		if err == nil && len(existing) > 0 {
+			// Already harvested - by http_probes, or by a prior run of
+			// this same harvester. Nothing further to do.
+			return nil
+		}
 	}
 
 	// Deliberately not assuming anything about which port a server
@@ -107,7 +108,15 @@ func HarvestCertificate(e *et.Event, dial amassnet.DialContext, parent *dbt.Enti
 		return errors.New("protocol_probes: TLS handshake succeeded but no peer certificates were presented")
 	}
 
+	svcEntity, portEdge, err := FindOrCreateService(e, parent, addr, port, "tls", "")
+	if err != nil {
+		return err
+	}
+
 	storeCertChain(e, svcEntity, certs)
+	// After the chain is stored, so JARM (which requires a certificate
+	// edge) sees it when it processes the Service event.
+	announceService(e, svcEntity, portEdge)
 	return nil
 }
 
@@ -199,7 +208,15 @@ func dialAndGetCertChain(ctx context.Context, dial amassnet.DialContext, addr, s
 // it when a Service already existed risked losing a legitimate edge
 // if this call's parent entity ever turned out to differ from
 // whichever plugin created the Service first.
-func FindOrCreateService(e *et.Event, parent *dbt.Entity, addr string, port int, svcType, output string) (*dbt.Entity, error) {
+//
+// The PortRelation carries the same "tcp_port_<n>" name http_probes uses.
+// An unnamed relation stored a second, parallel IP->Service edge on
+// SQLite (the edge's unique key includes the label) and blanked
+// http_probes' label inside the shared edge's content on Postgres.
+//
+// The returned edge is the parent->Service PortRelation, for
+// announceService.
+func FindOrCreateService(e *et.Event, parent *dbt.Entity, addr string, port int, svcType, output string) (*dbt.Entity, *dbt.Edge, error) {
 	serv := support.ServiceWithIdentifier(addr, "tcp", port)
 
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 15*time.Second)
@@ -207,7 +224,7 @@ func FindOrCreateService(e *et.Event, parent *dbt.Entity, addr string, port int,
 
 	svcEntity, err := findExistingServiceByUniqueID(ctx, e, serv.ID)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if svcEntity == nil {
 		serv.Type = svcType
@@ -216,22 +233,52 @@ func FindOrCreateService(e *et.Event, parent *dbt.Entity, addr string, port int,
 
 		svcEntity, err = e.Session.DB().CreateAsset(ctx, serv)
 		if err != nil || svcEntity == nil {
-			return nil, errors.New("protocol_probes: failed to create the Service asset")
+			return nil, nil, errors.New("protocol_probes: failed to create the Service asset")
 		}
 	}
 
-	if _, err := e.Session.DB().CreateEdge(ctx, &dbt.Edge{
+	edge, err := e.Session.DB().CreateEdge(ctx, &dbt.Edge{
 		Relation: &oamgen.PortRelation{
+			Name:       fmt.Sprintf("tcp_port_%d", port),
 			PortNumber: port,
 			Protocol:   "tcp",
 		},
 		FromEntity: parent,
 		ToEntity:   svcEntity,
-	}); err != nil {
-		return nil, err
+	})
+	if err != nil {
+		return nil, nil, err
 	}
 
-	return svcEntity, nil
+	return svcEntity, edge, nil
+}
+
+// announceService records Protocol-Probes as a source of the Service and
+// of its port edge, and dispatches the Service as an event so the Service
+// pipeline (Banner-URLs, Page-Links, Tech-Stack, JARM) processes it the
+// same way it processes http_probes' Services. Dispatch is a no-op for a
+// Service already dispatched in this session (for example, one
+// http_probes created first).
+func announceService(e *et.Event, svcEntity *dbt.Entity, portEdge *dbt.Edge) {
+	svc, ok := svcEntity.Asset.(*oamplat.Service)
+	if !ok {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 10*time.Second)
+	defer cancel()
+
+	src := &oamgen.SourceProperty{Source: harvestSource.Name, Confidence: harvestSource.Confidence}
+	_, _ = e.Session.DB().CreateEntityProperty(ctx, svcEntity, src)
+	if portEdge != nil {
+		_, _ = e.Session.DB().CreateEdgeProperty(ctx, portEdge, src)
+	}
+
+	_ = e.Dispatcher.DispatchEvent(&et.Event{
+		Name:    "Service: " + svc.ID,
+		Entity:  svcEntity,
+		Session: e.Session,
+	})
 }
 
 // findExistingServiceByUniqueID looks up a Service entity by its exact,

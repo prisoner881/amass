@@ -167,6 +167,11 @@ func EnsureOpenPortsScanned(e *et.Event, ent *dbt.Entity, dial amassnet.DialCont
 	if !ok {
 		return nil
 	}
+	// Private, loopback and other non-routable addresses are never
+	// scanned, even when an in-scope name resolves to one.
+	if IsNonRoutableAddress(ip.Address) {
+		return nil
+	}
 
 	result, err, _ := scanGroup.Do(ent.ID, func() (interface{}, error) {
 		ctx := e.Session.Ctx()

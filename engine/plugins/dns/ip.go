@@ -72,6 +72,12 @@ func (d *dnsIP) check(e *et.Event) error {
 			if !ok || ip == nil {
 				continue
 			}
+			// A private, loopback or otherwise non-routable answer is
+			// neither authorized for scanning nor swept: the address (and
+			// its neighbors) cannot be the target's Internet-facing host.
+			if support.IsNonRoutableAddress(ip.Address) {
+				continue
+			}
 
 			// Provenance-based scan authorization. An IP that an
 			// in-scope FQDN resolves to is individually authorized for

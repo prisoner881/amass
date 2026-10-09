@@ -216,11 +216,10 @@ func (ts *techStack) storeProduct(e *et.Event, serv *oamplat.Service, techName, 
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 10*time.Second)
 	defer cancel()
 
-	id := techName + "-" + support.Hash64Hex(strings.ToLower(techName))
 	category := strings.Join(appInfo.Categories, ", ")
 
-	productEntity, err := e.Session.DB().CreateAsset(ctx, &oamplat.Product{
-		ID:          id,
+	productEntity, err := support.CreateProductAsset(ctx, e.Session, techName, &oamplat.Product{
+		ID:          support.ProductID(techName),
 		Name:        techName,
 		Type:        "software",
 		Category:    category,
@@ -297,10 +296,7 @@ func (ts *techStack) storeRelease(e *et.Event, serv *oamplat.Service, productEnt
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 10*time.Second)
 	defer cancel()
 
-	releaseName := techName + " " + version
-	releaseEntity, err := e.Session.DB().CreateAsset(ctx, &oamplat.ProductRelease{
-		Name: releaseName,
-	})
+	releaseEntity, err := support.CreateProductReleaseAsset(ctx, e.Session, techName, version)
 	if err != nil || releaseEntity == nil {
 		ts.log.Error("failed to create ProductRelease entity",
 			"product", techName, "version", version, "asset", serv.ID, "error", errString(err))
@@ -367,5 +363,5 @@ func (ts *techStack) storeRelease(e *et.Event, serv *oamplat.Service, productEnt
 	_, _ = e.Session.DB().CreateEdgeProperty(ctx, svcEdge, src)
 
 	ts.log.Info("product release recorded",
-		"product", techName, "version", version, "release", releaseName, "asset", serv.ID)
+		"product", techName, "version", version, "release", releaseEntity.Asset.Key(), "asset", serv.ID)
 }

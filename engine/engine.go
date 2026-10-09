@@ -148,14 +148,11 @@ func logBuildInfo(l *slog.Logger) {
 }
 
 func (e *Engine) Shutdown() {
+	// The session-end hook (owned-netblock fill, Protocol-Probes sweep)
+	// is not run here: engine shutdown is an operator stop and must not
+	// start new scanning or block on it. The hook runs only through
+	// SessionManager.RunEndWork (POST /sessions/{id}/end-work).
 	_ = e.Server.Shutdown()
-	// Sweep while the dispatcher pump can still claim resubmitted IPs.
-	// CancelSession (TerminateSession) also runs the hook; a second
-	// pass is a no-op once Protocol-Probes has marked the misses.
-	for _, s := range e.Manager.GetSessions() {
-		support.FinishOwnedNetblockFills(s, e.Dispatcher)
-		protocol_probes.SweepMissedIPs(s, e.Dispatcher)
-	}
 	e.Dispatcher.Shutdown()
 	e.Manager.Shutdown()
 }
