@@ -22,8 +22,9 @@ import (
 	oamnet "github.com/owasp-amass/open-asset-model/network"
 )
 
-// sweepTestSession satisfies et.Session for seedScopedIP and
-// sweepSeedDomains, which only call Ctx, DB, Config and Scope.
+// sweepTestSession satisfies et.Session for seedScopedIP,
+// sweepSeedDomains and missListBatch, which only call Ctx, Done, DB,
+// Config and Scope.
 type sweepTestSession struct {
 	et.Session
 	db    repository.Repository
@@ -32,6 +33,7 @@ type sweepTestSession struct {
 }
 
 func (s *sweepTestSession) Ctx() context.Context      { return context.Background() }
+func (s *sweepTestSession) Done() bool                { return false }
 func (s *sweepTestSession) DB() repository.Repository { return s.db }
 func (s *sweepTestSession) Config() *config.Config    { return s.cfg }
 func (s *sweepTestSession) Scope() et.Scope           { return s.scope }
