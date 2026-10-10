@@ -8,7 +8,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -83,7 +82,9 @@ func (d *dnsrepo) check(e *et.Event) error {
 	ds := e.Session.Config().GetDataSourceConfig(d.name)
 	if ds != nil {
 		for _, cred := range ds.Creds {
-			keys = append(keys, cred.Apikey)
+			if cred != nil && cred.Apikey != "" {
+				keys = append(keys, cred.Apikey)
+			}
 		}
 	}
 	// add an empty API key
@@ -96,8 +97,11 @@ func (d *dnsrepo) check(e *et.Event) error {
 
 	var names []*dbt.Entity
 	if !support.AssetMonitoredWithinTTL(e.Session, e.Entity, d.source, since) {
-		names = append(names, d.query(e, fqdn.Name, keys)...)
-		support.MarkAssetMonitored(e.Session, e.Entity, d.source)
+		var completed bool
+		names, completed = d.query(e, fqdn.Name, keys)
+		if completed {
+			support.MarkAssetMonitored(e.Session, e.Entity, d.source)
+		}
 	}
 
 	if len(names) > 0 {
@@ -106,9 +110,10 @@ func (d *dnsrepo) check(e *et.Event) error {
 	return nil
 }
 
-func (d *dnsrepo) query(e *et.Event, name string, keys []string) []*dbt.Entity {
-	var names []string
-
+// query tries each API key, then the public page, until one answers, and
+// reports whether one did; check() marks the name monitored only then.
+func (d *dnsrepo) query(e *et.Event, name string, keys []string) ([]*dbt.Entity, bool) {
+	var reason string
 	for _, key := range keys {
 		var req *amasshttp.Request
 
@@ -128,20 +133,25 @@ func (d *dnsrepo) query(e *et.Event, name string, keys []string) []*dbt.Entity {
 
 		resp, err := amasshttp.RequestWebPage(ctx, e.Session.Clients().General, req)
 		e.Session.NetSem().Release()
-		if err == nil {
-			if key == "" {
-				names = append(names, d.parseHTML(e, resp.Body)...)
-			} else {
-				names = append(names, d.parseJSON(e, resp.Body)...)
-			}
-			break
-		} else {
-			e.Session.Log().Error(fmt.Sprintf("Failed to use the API endpoint: %v", err),
-				slog.Group("plugin", "name", d.name, "handler", d.name+"-Handler"))
+		if reason = support.HTTPLookupFailure(resp, err); reason != "" {
+			continue
 		}
+
+		if key == "" {
+			return d.store(e, d.parseHTML(e, resp.Body)), true
+		}
+		names, err := d.parseJSON(e, resp.Body)
+		if err != nil {
+			reason = "undecodable API response: " + err.Error()
+			continue
+		}
+		return d.store(e, names), true
 	}
 
-	return d.store(e, names)
+	if e.Session.Ctx().Err() == nil {
+		support.LogLookupFailure(d.log, d.name, name, reason)
+	}
+	return nil, false
 }
 
 func (d *dnsrepo) parseHTML(e *et.Event, body string) []string {
@@ -160,7 +170,7 @@ func (d *dnsrepo) parseHTML(e *et.Event, body string) []string {
 	return names
 }
 
-func (d *dnsrepo) parseJSON(e *et.Event, body string) []string {
+func (d *dnsrepo) parseJSON(e *et.Event, body string) ([]string, error) {
 	set := stringset.New()
 	defer set.Close()
 
@@ -174,7 +184,7 @@ func (d *dnsrepo) parseJSON(e *et.Event, body string) []string {
 	}
 
 	if err := json.Unmarshal([]byte("{\"results\":"+body+"}"), &resp); err != nil {
-		return set.Slice()
+		return nil, err
 	}
 
 	for _, r := range resp.Results {
@@ -193,7 +203,7 @@ func (d *dnsrepo) parseJSON(e *et.Event, body string) []string {
 		}
 	}
 
-	return set.Slice()
+	return set.Slice(), nil
 }
 
 func (d *dnsrepo) store(e *et.Event, names []string) []*dbt.Entity {

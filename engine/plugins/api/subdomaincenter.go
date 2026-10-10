@@ -99,8 +99,11 @@ func (sc *subdomainCenter) check(e *et.Event) error {
 
 	var names []*dbt.Entity
 	if !support.AssetMonitoredWithinTTL(e.Session, e.Entity, sc.source, since) {
-		names = append(names, sc.query(e, fqdn.Name, sc.apiKey(e))...)
-		support.MarkAssetMonitored(e.Session, e.Entity, sc.source)
+		var completed bool
+		names, completed = sc.query(e, fqdn.Name, sc.apiKey(e))
+		if completed {
+			support.MarkAssetMonitored(e.Session, e.Entity, sc.source)
+		}
 	}
 
 	if len(names) > 0 {
@@ -132,22 +135,23 @@ func (sc *subdomainCenter) apiKey(e *et.Event) string {
 // that, not a short cutoff meant for a much slower limiter.
 const maxAcceptableSubdomainCenterWait = 45 * time.Second
 
-func (sc *subdomainCenter) query(e *et.Event, name, key string) []*dbt.Entity {
+// query reports whether SubdomainCenter answered; check() marks the name
+// monitored only then.
+func (sc *subdomainCenter) query(e *et.Event, name, key string) ([]*dbt.Entity, bool) {
 	reservation := sc.rlimit.Reserve()
 	if !reservation.OK() {
-		return nil
+		return nil, false
 	}
 	delay := reservation.Delay()
 	if delay > maxAcceptableSubdomainCenterWait {
 		reservation.Cancel()
-		sc.log.Warn("skipping SubdomainCenter call, rate limit wait too long",
-			"name", name, "wait", delay.String())
-		return nil
+		support.LogLookupFailure(sc.log, sc.name, name, "call skipped, rate limit wait "+delay.String())
+		return nil, false
 	}
 	select {
 	case <-e.Session.Ctx().Done():
 		reservation.Cancel()
-		return nil
+		return nil, false
 	case <-time.After(delay):
 	}
 	e.Session.NetSem().Acquire()
@@ -167,17 +171,15 @@ func (sc *subdomainCenter) query(e *et.Event, name, key string) []*dbt.Entity {
 
 	resp, err := amasshttp.RequestWebPage(ctx, e.Session.Clients().General, req)
 	e.Session.NetSem().Release()
-	if err != nil {
-		return nil
-	}
-	if resp.StatusCode != 200 || resp.Body == "" {
-		return nil
+	if reason := support.HTTPLookupFailure(resp, err); reason != "" {
+		support.LogLookupFailure(sc.log, sc.name, name, reason)
+		return nil, false
 	}
 
 	var results []string
 	if err := json.Unmarshal([]byte(resp.Body), &results); err != nil {
-		sc.log.Warn("failed to decode the JSON response")
-		return nil
+		support.LogLookupFailure(sc.log, sc.name, name, "undecodable response: "+err.Error())
+		return nil, false
 	}
 
 	var names []string
@@ -191,7 +193,7 @@ func (sc *subdomainCenter) query(e *et.Event, name, key string) []*dbt.Entity {
 		}
 	}
 
-	return sc.store(e, names)
+	return sc.store(e, names), true
 }
 
 func (sc *subdomainCenter) store(e *et.Event, names []string) []*dbt.Entity {

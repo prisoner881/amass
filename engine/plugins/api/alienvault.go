@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"net/url"
@@ -103,8 +104,8 @@ func (a *alienVault) check(e *et.Event) error {
 		return nil
 	}
 
-	names, retry := a.query(e, fqdn.Name, keys)
-	if !retry {
+	names, completed := a.query(e, fqdn.Name, keys)
+	if completed {
 		support.MarkAssetMonitored(e.Session, e.Entity, a.source)
 	}
 	if len(names) > 0 {
@@ -138,25 +139,29 @@ type otxPDNSRecord struct {
 	RecordType string `json:"record_type"`
 }
 
+// query tries each configured key until OTX answers, and reports whether
+// it did; check() marks the name monitored only then. A rejected key, a
+// rate limit or a server error moves on to the next key.
 func (a *alienVault) query(e *et.Event, apex string, keys []string) ([]*dbt.Entity, bool) {
-	var lastRetry bool
+	var reason string
 	for _, key := range keys {
-		names, retry, err := a.fetch(e, apex, key)
-		if retry {
-			lastRetry = true
-			continue
-		}
-		if err != nil {
-			a.log.Warn("OTX query failed", "apex", apex, "error", err.Error())
+		names, failure := a.fetch(e, apex, key)
+		if failure != "" {
+			reason = failure
 			continue
 		}
 		a.log.Info("OTX passive_dns", "apex", apex, "rows", len(names))
-		return a.store(e, names), false
+		return a.store(e, names), true
 	}
-	return nil, lastRetry
+	if e.Session.Ctx().Err() == nil {
+		support.LogLookupFailure(a.log, a.name, apex, reason)
+	}
+	return nil, false
 }
 
-func (a *alienVault) fetch(e *et.Event, apex, key string) ([]string, bool, error) {
+// fetch returns the in-scope names OTX has for apex, or why it did not
+// answer.
+func (a *alienVault) fetch(e *et.Event, apex, key string) ([]string, string) {
 	_ = a.rlimit.Wait(e.Session.Ctx())
 	e.Session.NetSem().Acquire()
 
@@ -169,25 +174,18 @@ func (a *alienVault) fetch(e *et.Event, apex, key string) ([]string, bool, error
 		Header: amasshttp.Header{"X-OTX-API-KEY": []string{key}},
 	})
 	e.Session.NetSem().Release()
-	if err != nil {
-		return nil, true, err
+	if err == nil && resp != nil && (resp.StatusCode == 401 || resp.StatusCode == 403) {
+		return nil, fmt.Sprintf("API key rejected (HTTP %d)", resp.StatusCode)
 	}
-	if resp.StatusCode == 429 || resp.StatusCode >= 500 {
-		return nil, true, nil
-	}
-	if resp.StatusCode == 401 || resp.StatusCode == 403 {
-		a.log.Warn("OTX rejected API key", "status", resp.StatusCode)
-		return nil, false, nil
-	}
-	if resp.StatusCode != 200 || resp.Body == "" {
-		return nil, false, nil
+	if reason := support.HTTPLookupFailure(resp, err); reason != "" {
+		return nil, reason
 	}
 
 	var result otxPassiveDNS
 	if err := json.Unmarshal([]byte(resp.Body), &result); err != nil {
-		return nil, false, err
+		return nil, "undecodable response: " + err.Error()
 	}
-	return collectOTXHostnames(e, result.PassiveDNS), false, nil
+	return collectOTXHostnames(e, result.PassiveDNS), ""
 }
 
 func collectOTXHostnames(e *et.Event, recs []otxPDNSRecord) []string {

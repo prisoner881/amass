@@ -100,8 +100,11 @@ func (dd *dnsDumpster) check(e *et.Event) error {
 
 	var names []*dbt.Entity
 	if !support.AssetMonitoredWithinTTL(e.Session, e.Entity, dd.source, since) {
-		names = append(names, dd.query(e, fqdn.Name, key)...)
-		support.MarkAssetMonitored(e.Session, e.Entity, dd.source)
+		var completed bool
+		names, completed = dd.query(e, fqdn.Name, key)
+		if completed {
+			support.MarkAssetMonitored(e.Session, e.Entity, dd.source)
+		}
 	}
 
 	if len(names) > 0 {
@@ -148,22 +151,23 @@ type dnsDumpsterResponse struct {
 // that, not a short cutoff meant for a much slower limiter.
 const maxAcceptableDNSDumpsterWait = 45 * time.Second
 
-func (dd *dnsDumpster) query(e *et.Event, name, key string) []*dbt.Entity {
+// query reports whether DNSDumpster answered; check() marks the name
+// monitored only then.
+func (dd *dnsDumpster) query(e *et.Event, name, key string) ([]*dbt.Entity, bool) {
 	reservation := dd.rlimit.Reserve()
 	if !reservation.OK() {
-		return nil
+		return nil, false
 	}
 	delay := reservation.Delay()
 	if delay > maxAcceptableDNSDumpsterWait {
 		reservation.Cancel()
-		dd.log.Warn("skipping DNSDumpster call, rate limit wait too long",
-			"name", name, "wait", delay.String())
-		return nil
+		support.LogLookupFailure(dd.log, dd.name, name, "call skipped, rate limit wait "+delay.String())
+		return nil, false
 	}
 	select {
 	case <-e.Session.Ctx().Done():
 		reservation.Cancel()
-		return nil
+		return nil, false
 	case <-time.After(delay):
 	}
 	e.Session.NetSem().Acquire()
@@ -182,25 +186,19 @@ func (dd *dnsDumpster) query(e *et.Event, name, key string) []*dbt.Entity {
 		Header: amasshttp.Header{"X-API-Key": []string{key}},
 	})
 	e.Session.NetSem().Release()
-	if err != nil {
-		return nil
-	}
-
-	if resp.StatusCode == 429 {
-		dd.log.Warn("rate limited by the DNSDumpster API")
-		return nil
-	}
-	if resp.StatusCode != 200 || resp.Body == "" {
-		return nil
+	if reason := support.HTTPLookupFailure(resp, err); reason != "" {
+		support.LogLookupFailure(dd.log, dd.name, name, reason)
+		return nil, false
 	}
 
 	var d dnsDumpsterResponse
 	if err := json.Unmarshal([]byte(resp.Body), &d); err != nil {
-		return nil
+		support.LogLookupFailure(dd.log, dd.name, name, "undecodable response: "+err.Error())
+		return nil, false
 	}
 	if d.APIError != "" {
-		dd.log.Warn("DNSDumpster API error: " + d.APIError)
-		return nil
+		support.LogLookupFailure(dd.log, dd.name, name, "API error: "+d.APIError)
+		return nil, false
 	}
 
 	var hosts []string
@@ -216,7 +214,7 @@ func (dd *dnsDumpster) query(e *et.Event, name, key string) []*dbt.Entity {
 		}
 	}
 
-	return dd.store(e, hosts)
+	return dd.store(e, hosts), true
 }
 
 func (dd *dnsDumpster) store(e *et.Event, names []string) []*dbt.Entity {
