@@ -6,6 +6,7 @@ package protocol_probes
 
 import (
 	"context"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"log/slog"
@@ -181,6 +182,23 @@ func TestHarvestCertificate_SuccessStoresAndDispatchesService(t *testing.T) {
 	}
 	if n := d.dispatched(oam.Service); n != 1 {
 		t.Errorf("dispatched %d Service events, want 1", n)
+	}
+
+	// TLSCert-Expansion extracts the certificate's names only from the
+	// parsed certificate carried on the event.
+	var leaf *x509.Certificate
+	d.mu.Lock()
+	for _, ev := range d.events {
+		if ev.Entity != nil && ev.Entity.Asset.AssetType() == oam.TLSCertificate {
+			leaf, _ = ev.Meta.(*x509.Certificate)
+		}
+	}
+	d.mu.Unlock()
+	if leaf == nil {
+		t.Fatal("the TLSCertificate event carries no parsed certificate")
+	}
+	if leaf.Subject.CommonName != "test.example.com" {
+		t.Errorf("event certificate CN = %q, want %q", leaf.Subject.CommonName, "test.example.com")
 	}
 }
 

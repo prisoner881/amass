@@ -373,7 +373,11 @@ func storeCertChain(e *et.Event, svcEntity *dbt.Entity, certs []*x509.Certificat
 				FromName: svcName,
 				To:       firstEntity,
 				ToName:   leafCert.SerialNumber,
-				Rel:      &oamgen.SimpleRelation{Name: "certificate"},
+				// TLSCert-Expansion reads the CN and SAN names only from
+				// the parsed certificate on the event, as http_probes
+				// passes it; without it the names are never linked.
+				ToMeta: certs[0],
+				Rel:    &oamgen.SimpleRelation{Name: "certificate"},
 			})
 		}
 	}
