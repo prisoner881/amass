@@ -52,6 +52,15 @@ type portPrefilter struct {
 	log  *slog.Logger
 }
 
+// prefilterTransforms gates the handler the same way as the plugins that
+// consume its open_port tags (Protocol-Probes, HTTP-Probes): it runs when
+// the session config enables IPAddress->Service discovery, which the stock
+// IPAddress->ALL does. With no Transforms the pipeline ran it only when the
+// config named Port-Prefilter explicitly, so IPs no in-scope name resolves
+// to (owned-netblock fills, -addr/-cidr seeds) were never scanned; only the
+// FQDN path's scans (support.OpenPortsForFQDN) ever reached an IP.
+var prefilterTransforms = []string{string(oam.Service)}
+
 func NewPortPrefilter() et.Plugin {
 	return &portPrefilter{name: "Port-Prefilter"}
 }
@@ -69,6 +78,7 @@ func (pp *portPrefilter) Start(r et.Registry) error {
 		Position:     41,
 		Exclusive:    true,
 		MaxInstances: support.HighHandlerInstances,
+		Transforms:   prefilterTransforms,
 		EventType:    oam.IPAddress,
 		Callback:     pp.check,
 	}); err != nil {
