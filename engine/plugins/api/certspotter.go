@@ -8,6 +8,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/url"
 	"strconv"
@@ -113,8 +114,11 @@ func (cs *certSpotter) check(e *et.Event) error {
 
 	var names []*dbt.Entity
 	if !support.AssetMonitoredWithinTTL(e.Session, e.Entity, cs.source, since) {
-		names = append(names, cs.query(e, fqdn.Name, cs.apiKey(e))...)
-		support.MarkAssetMonitored(e.Session, e.Entity, cs.source)
+		var completed bool
+		names, completed = cs.query(e, fqdn.Name, cs.apiKey(e))
+		if completed {
+			support.MarkAssetMonitored(e.Session, e.Entity, cs.source)
+		}
 	}
 
 	if len(names) > 0 {
@@ -139,13 +143,21 @@ func (cs *certSpotter) apiKey(e *et.Event) string {
 	return ""
 }
 
-func (cs *certSpotter) query(e *et.Event, name, key string) []*dbt.Entity {
+// query reports whether every page was fetched; check() marks the name
+// monitored only then. Names from the pages fetched before a failure are
+// still stored, and the next session fetches the whole list again.
+func (cs *certSpotter) query(e *et.Event, name, key string) ([]*dbt.Entity, bool) {
 	var names []string
 
+	completed := true
 	after := ""
 	for {
 		issuances, retryAfter, err := cs.page(e, name, key, after)
 		if err != nil {
+			completed = false
+			if e.Session.Ctx().Err() == nil {
+				support.LogLookupFailure(cs.log, cs.name, name, err.Error())
+			}
 			break
 		}
 		if len(issuances) == 0 {
@@ -174,7 +186,7 @@ func (cs *certSpotter) query(e *et.Event, name, key string) []*dbt.Entity {
 		after = last
 	}
 
-	return cs.store(e, names)
+	return cs.store(e, names), completed
 }
 
 type certSpotterIssuance struct {
@@ -237,9 +249,8 @@ func (cs *certSpotter) page(e *et.Event, name, key, after string) ([]certSpotter
 	delay := reservation.Delay()
 	if delay > maxWait {
 		reservation.Cancel()
-		cs.log.Warn("skipping CertSpotter call, rate limit wait too long",
-			"name", name, "wait", delay.String(), "authenticated", key != "")
-		return nil, 0, errors.New("CertSpotter: rate limit wait exceeded acceptable bound")
+		return nil, 0, fmt.Errorf("CertSpotter: call skipped, rate limit wait %s (authenticated: %t)",
+			delay.String(), key != "")
 	}
 
 	select {
@@ -279,8 +290,8 @@ func (cs *certSpotter) page(e *et.Event, name, key, after string) ([]certSpotter
 		cs.setRetryNotBefore(retryAfter)
 		return nil, retryAfter, errors.New("CertSpotter: rate limited")
 	}
-	if resp.StatusCode != 200 || resp.Body == "" {
-		return nil, retryAfter, errors.New("CertSpotter: unexpected response")
+	if reason := support.HTTPLookupFailure(resp, nil); reason != "" {
+		return nil, retryAfter, errors.New("CertSpotter: " + reason)
 	}
 
 	var issuances []certSpotterIssuance

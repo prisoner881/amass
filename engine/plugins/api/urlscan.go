@@ -166,8 +166,9 @@ func (u *urlscan) checkFQDN(e *et.Event) error {
 	}
 
 	if !support.AssetMonitoredWithinTTL(e.Session, e.Entity, u.source, since) {
-		u.query(e, "domain:"+fqdn.Name, key)
-		support.MarkAssetMonitored(e.Session, e.Entity, u.source)
+		if u.query(e, "domain:"+fqdn.Name, key) {
+			support.MarkAssetMonitored(e.Session, e.Entity, u.source)
+		}
 	}
 	return nil
 }
@@ -204,22 +205,24 @@ type urlscanResponse struct {
 // that, not a short cutoff meant for a much slower limiter.
 const maxAcceptableURLScanWait = 45 * time.Second
 
-func (u *urlscan) query(e *et.Event, q, key string) {
+// query reports whether urlscan.io answered; checkFQDN marks the name
+// monitored only then, so a rejected key, an exhausted quota or a skipped
+// call is retried by the next session.
+func (u *urlscan) query(e *et.Event, q, key string) bool {
 	reservation := u.rlimit.Reserve()
 	if !reservation.OK() {
-		return
+		return false
 	}
 	delay := reservation.Delay()
 	if delay > maxAcceptableURLScanWait {
 		reservation.Cancel()
-		u.log.Warn("skipping URLScan call, rate limit wait too long",
-			"query", q, "wait", delay.String())
-		return
+		support.LogLookupFailure(u.log, u.name, q, "call skipped, rate limit wait "+delay.String())
+		return false
 	}
 	select {
 	case <-e.Session.Ctx().Done():
 		reservation.Cancel()
-		return
+		return false
 	case <-time.After(delay):
 	}
 	e.Session.NetSem().Acquire()
@@ -235,14 +238,15 @@ func (u *urlscan) query(e *et.Event, q, key string) {
 		Header: amasshttp.Header{"API-Key": []string{key}},
 	})
 	e.Session.NetSem().Release()
-	if err != nil || resp.StatusCode != 200 || resp.Body == "" {
-		return
+	if reason := support.HTTPLookupFailure(resp, err); reason != "" {
+		support.LogLookupFailure(u.log, u.name, q, reason)
+		return false
 	}
 
 	var parsed urlscanResponse
 	if err := json.Unmarshal([]byte(resp.Body), &parsed); err != nil {
-		u.log.Warn("failed to decode the URLScan response")
-		return
+		support.LogLookupFailure(u.log, u.name, q, "undecodable response: "+err.Error())
+		return false
 	}
 
 	var fqdnNames []string
@@ -286,6 +290,7 @@ func (u *urlscan) query(e *et.Event, q, key string) {
 			u.storePTR(e, ipEntity, r.Page.PTR)
 		}
 	}
+	return true
 }
 
 func (u *urlscan) storeIP(e *et.Event, fqdnEntity *dbt.Entity, ipStr string) *dbt.Entity {

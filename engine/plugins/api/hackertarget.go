@@ -87,8 +87,11 @@ func (ht *hackerTarget) check(e *et.Event) error {
 
 	var names []*dbt.Entity
 	if !support.AssetMonitoredWithinTTL(e.Session, e.Entity, ht.source, since) {
-		names = append(names, ht.query(e, fqdn.Name)...)
-		support.MarkAssetMonitored(e.Session, e.Entity, ht.source)
+		var completed bool
+		names, completed = ht.query(e, fqdn.Name)
+		if completed {
+			support.MarkAssetMonitored(e.Session, e.Entity, ht.source)
+		}
 	}
 
 	if len(names) > 0 {
@@ -97,7 +100,23 @@ func (ht *hackerTarget) check(e *et.Event) error {
 	return nil
 }
 
-func (ht *hackerTarget) query(e *et.Event, name string) []*dbt.Entity {
+// hackerTargetFailure reports why a 200 response body is not an answer.
+// HackerTarget returns its daily quota notice ("API count exceeded -
+// Increase Quota with Membership") as plain text with status 200, which
+// parses as an empty result. Its other plain-text replies ("error ...")
+// are still taken as the answer for the name: one of them may mean that
+// nothing was found, and retrying those every session would spend the
+// daily quota.
+func hackerTargetFailure(body string) string {
+	if strings.Contains(strings.ToLower(body), "api count exceeded") {
+		return "daily API quota exceeded"
+	}
+	return ""
+}
+
+// query reports whether HackerTarget answered; check() marks the name
+// monitored only then.
+func (ht *hackerTarget) query(e *et.Event, name string) ([]*dbt.Entity, bool) {
 	_ = ht.rlimit.Wait(e.Session.Ctx())
 	e.Session.NetSem().Acquire()
 
@@ -107,8 +126,13 @@ func (ht *hackerTarget) query(e *et.Event, name string) []*dbt.Entity {
 	resp, err := amasshttp.RequestWebPage(ctx,
 		e.Session.Clients().General, &amasshttp.Request{URL: ht.url + name})
 	e.Session.NetSem().Release()
-	if err != nil {
-		return nil
+	reason := support.HTTPLookupFailure(resp, err)
+	if reason == "" {
+		reason = hackerTargetFailure(resp.Body)
+	}
+	if reason != "" {
+		support.LogLookupFailure(ht.log, ht.name, name, reason)
+		return nil, false
 	}
 
 	var names []string
@@ -125,7 +149,7 @@ func (ht *hackerTarget) query(e *et.Event, name string) []*dbt.Entity {
 		}
 	}
 
-	return ht.store(e, names)
+	return ht.store(e, names), true
 }
 
 func (ht *hackerTarget) store(e *et.Event, names []string) []*dbt.Entity {

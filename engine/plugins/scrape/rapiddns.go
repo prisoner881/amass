@@ -89,8 +89,11 @@ func (rd *rapidDNS) check(e *et.Event) error {
 
 	var names []*dbt.Entity
 	if !support.AssetMonitoredWithinTTL(e.Session, e.Entity, rd.source, since) {
-		names = append(names, rd.query(e, fqdn.Name)...)
-		support.MarkAssetMonitored(e.Session, e.Entity, rd.source)
+		var completed bool
+		names, completed = rd.query(e, fqdn.Name)
+		if completed {
+			support.MarkAssetMonitored(e.Session, e.Entity, rd.source)
+		}
 	}
 
 	if len(names) > 0 {
@@ -99,7 +102,9 @@ func (rd *rapidDNS) check(e *et.Event) error {
 	return nil
 }
 
-func (rd *rapidDNS) query(e *et.Event, name string) []*dbt.Entity {
+// query reports whether RapidDNS answered; check() marks the name
+// monitored only then.
+func (rd *rapidDNS) query(e *et.Event, name string) ([]*dbt.Entity, bool) {
 	subs := stringset.New()
 	defer subs.Close()
 
@@ -112,8 +117,9 @@ func (rd *rapidDNS) query(e *et.Event, name string) []*dbt.Entity {
 	resp, err := amasshttp.RequestWebPage(ctx,
 		e.Session.Clients().General, &amasshttp.Request{URL: fmt.Sprintf(rd.fmtstr, name)})
 	e.Session.NetSem().Release()
-	if err != nil || resp.Body == "" {
-		return nil
+	if reason := support.HTTPLookupFailure(resp, err); reason != "" {
+		support.LogLookupFailure(rd.log, rd.name, name, reason)
+		return nil, false
 	}
 
 	for _, n := range support.ScrapeSubdomainNames(resp.Body) {
@@ -124,7 +130,7 @@ func (rd *rapidDNS) query(e *et.Event, name string) []*dbt.Entity {
 		}
 	}
 
-	return rd.store(e, subs.Slice())
+	return rd.store(e, subs.Slice()), true
 }
 
 func (rd *rapidDNS) store(e *et.Event, names []string) []*dbt.Entity {

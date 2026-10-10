@@ -297,8 +297,7 @@ func (t *ipTHC) fetchCSV(e *et.Event, rawURL, kind, key string) ([]string, bool)
 	delay := reservation.Delay()
 	if delay > maxAcceptableTHCWait {
 		reservation.Cancel()
-		t.log.Warn("skipping IP-THC call, rate limit wait too long",
-			"kind", kind, "key", key, "wait", delay.String())
+		support.LogLookupFailure(t.log, t.name, kind+" "+key, "call skipped, rate limit wait "+delay.String())
 		return nil, true
 	}
 	select {
@@ -319,21 +318,22 @@ func (t *ipTHC) fetchCSV(e *et.Event, rawURL, kind, key string) ([]string, bool)
 		},
 	})
 	e.Session.NetSem().Release()
-	if err != nil {
-		t.log.Warn("IP-THC request failed", "kind", kind, "key", key, "error", err.Error())
+	if err != nil || resp == nil {
+		if e.Session.Ctx().Err() == nil {
+			support.LogLookupFailure(t.log, t.name, kind+" "+key, support.HTTPLookupFailure(resp, err))
+		}
 		return nil, true
 	}
-	if resp == nil {
-		return nil, true
-	}
-	if resp.StatusCode == 429 {
-		t.log.Warn("IP-THC rate limited", "kind", kind, "key", key)
+	// Retried: rate limited, refused (401/403) or a server error. Any other
+	// status, or an empty body, is THC's answer for that key and is marked.
+	if resp.StatusCode == 429 || resp.StatusCode == 401 || resp.StatusCode == 403 || resp.StatusCode >= 500 {
+		support.LogLookupFailure(t.log, t.name, kind+" "+key, support.HTTPLookupFailure(resp, nil))
 		return nil, true
 	}
 	if resp.StatusCode != 200 || resp.Body == "" {
 		t.log.Warn("IP-THC unexpected status",
 			"kind", kind, "key", key, "status", resp.StatusCode)
-		return nil, resp.StatusCode >= 500
+		return nil, false
 	}
 
 	names := parseTHCDomainCSV(resp.Body)

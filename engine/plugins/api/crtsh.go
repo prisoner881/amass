@@ -96,8 +96,11 @@ func (c *crtsh) check(e *et.Event) error {
 
 	var names []*dbt.Entity
 	if !support.AssetMonitoredWithinTTL(e.Session, e.Entity, c.source, since) {
-		names = append(names, c.query(e, fqdn.Name)...)
-		support.MarkAssetMonitored(e.Session, e.Entity, c.source)
+		var completed bool
+		names, completed = c.query(e, fqdn.Name)
+		if completed {
+			support.MarkAssetMonitored(e.Session, e.Entity, c.source)
+		}
 	}
 
 	if len(names) > 0 {
@@ -106,7 +109,9 @@ func (c *crtsh) check(e *et.Event) error {
 	return nil
 }
 
-func (c *crtsh) query(e *et.Event, name string) []*dbt.Entity {
+// query reports whether crt.sh answered; check() marks the name monitored
+// only then (see support.HTTPLookupFailure).
+func (c *crtsh) query(e *et.Event, name string) ([]*dbt.Entity, bool) {
 	_ = c.rlimit.Wait(e.Session.Ctx())
 	e.Session.NetSem().Acquire()
 
@@ -117,8 +122,9 @@ func (c *crtsh) query(e *et.Event, name string) []*dbt.Entity {
 		URL: "https://crt.sh/?CN=" + name + "&output=json&exclude=expired",
 	})
 	e.Session.NetSem().Release()
-	if err != nil {
-		return nil
+	if reason := support.HTTPLookupFailure(resp, err); reason != "" {
+		support.LogLookupFailure(c.log, c.name, name, reason)
+		return nil, false
 	}
 
 	var result struct {
@@ -127,7 +133,8 @@ func (c *crtsh) query(e *et.Event, name string) []*dbt.Entity {
 		} `json:"certs"`
 	}
 	if err := json.Unmarshal([]byte("{\"certs\":"+resp.Body+"}"), &result); err != nil {
-		return nil
+		support.LogLookupFailure(c.log, c.name, name, "undecodable response: "+err.Error())
+		return nil, false
 	}
 
 	var names []string
@@ -141,7 +148,7 @@ func (c *crtsh) query(e *et.Event, name string) []*dbt.Entity {
 		}
 	}
 
-	return c.store(e, names)
+	return c.store(e, names), true
 }
 
 func (c *crtsh) store(e *et.Event, names []string) []*dbt.Entity {
