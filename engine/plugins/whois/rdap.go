@@ -147,6 +147,10 @@ type rdapDomainResponse struct {
 // 16 * 2s = 32s.
 const maxAcceptableRDAPWait = 45 * time.Second
 
+// errRDAPNotFound is the registry's answer that it has no record of the
+// domain (status 404).
+var errRDAPNotFound = errors.New("RDAP: server returned status 404, the domain has no record")
+
 func (w *whois) queryRDAP(e *et.Event, domain string) (*whoisparser.WhoisInfo, string, error) {
 	if !w.readyToCallRDAP() {
 		return nil, "", errors.New("RDAP: waiting out a server-directed backoff")
@@ -197,6 +201,9 @@ func (w *whois) queryRDAP(e *et.Event, domain string) (*whoisparser.WhoisInfo, s
 	if resp.StatusCode == 429 {
 		w.setRDAPRetryNotBefore(parseRDAPRetryAfter(resp.Header))
 		return nil, "", errors.New("RDAP: server responded 429, backing off")
+	}
+	if resp.StatusCode == 404 {
+		return nil, "", errRDAPNotFound
 	}
 	if resp.StatusCode != 200 {
 		return nil, "", fmt.Errorf("RDAP: server returned status %d", resp.StatusCode)

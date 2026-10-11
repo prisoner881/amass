@@ -35,24 +35,32 @@ func (d *dnsApex) check(e *et.Event) error {
 		return nil
 	}
 
-	// determine which domain zone apex is the parent of the entity name
-	var name string
-	best := len(fqdn.Name)
-	for _, n := range d.plugin.getApexList() {
-		if !strings.HasSuffix(fqdn.Name, "."+n) {
+	if apex := d.plugin.apexOf(fqdn.Name); apex != nil {
+		d.store(e, fqdn.Name, e.Entity, apex)
+	}
+	return nil
+}
+
+// apexOf returns the closest known zone apex that is a parent of name, or
+// nil when there is none or name is that apex itself.
+func (d *dnsPlugin) apexOf(name string) *dbt.Entity {
+	var apexName string
+	best := len(name)
+	for _, n := range d.getApexList() {
+		if !strings.HasSuffix(name, "."+n) {
 			continue
 		}
-		if idx := strings.Index(fqdn.Name, n); idx != -1 && idx != 0 && idx < best {
+		if idx := strings.Index(name, n); idx != -1 && idx != 0 && idx < best {
 			best = idx
-			name = n
+			apexName = n
 		}
 	}
-	if name == "" {
+	if apexName == "" {
 		return nil
 	}
 
-	if apex := d.plugin.getApex(name); apex != nil && apex.Asset.Key() != fqdn.Name {
-		d.store(e, fqdn.Name, e.Entity, apex)
+	if apex := d.getApex(apexName); apex != nil && apex.Asset.Key() != name {
+		return apex
 	}
 	return nil
 }

@@ -7,11 +7,11 @@ import (
 
 func TestEmailDomain(t *testing.T) {
 	cases := map[string]string{
-		"Abuse@buffalo.edu":        "buffalo.edu",
-		"noc@cit.buffalo.edu":      "cit.buffalo.edu",
-		"not-an-email":             "",
-		"":                         "",
-		"@buffalo.edu":             "buffalo.edu",
+		"Abuse@buffalo.edu":   "buffalo.edu",
+		"noc@cit.buffalo.edu": "cit.buffalo.edu",
+		"not-an-email":        "",
+		"":                    "",
+		"@buffalo.edu":        "buffalo.edu",
 	}
 	for in, want := range cases {
 		if got := emailDomain(in); got != want {

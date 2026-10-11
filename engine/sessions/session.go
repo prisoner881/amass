@@ -31,26 +31,26 @@ import (
 )
 
 type Session struct {
-	id           uuid.UUID
-	mgr          *manager
-	ctx          context.Context
-	cancel       context.CancelFunc
-	log          *slog.Logger
-	ps           *pubsub.Logger
-	cfg          *config.Config
-	scope        et.Scope
-	start        time.Time
-	db           repository.Repository
-	backlog      *sessionBacklog
-	pipelines    et.SessionPipelines
-	dsn          string
-	dbtype       string
-	clients      *Clients
-	ranger       cidranger.Ranger
-	tmpdir       string
-	stats        *et.SessionStats
-	done         chan struct{}
-	finished     bool
+	id            uuid.UUID
+	mgr           *manager
+	ctx           context.Context
+	cancel        context.CancelFunc
+	log           *slog.Logger
+	ps            *pubsub.Logger
+	cfg           *config.Config
+	scope         et.Scope
+	start         time.Time
+	db            repository.Repository
+	backlog       *sessionBacklog
+	pipelines     et.SessionPipelines
+	dsn           string
+	dbtype        string
+	clients       *Clients
+	ranger        cidranger.Ranger
+	tmpdir        string
+	stats         *et.SessionStats
+	done          chan struct{}
+	finished      bool
 	numOfSess     int
 	netSemaphore  *sessSemaphore
 	scanSemaphore *sessSemaphore
@@ -74,18 +74,18 @@ func CreateSession(mgr *manager, reg et.Registry, cfg *config.Config) (et.Sessio
 	ctx, cancel := context.WithCancel(context.Background())
 	// Create a new session object
 	s := &Session{
-		id:           uuid.New(),
-		mgr:          mgr,
-		ctx:          ctx,
-		cancel:       cancel,
-		cfg:          cfg,
-		start:        startTime,
-		clients:      clients,
-		ranger:       NewAmassRanger(),
-		ps:           pubsub.NewLogger(),
-		stats:        new(et.SessionStats),
-		done:         make(chan struct{}),
-		numOfSess:    numOfSessions,
+		id:            uuid.New(),
+		mgr:           mgr,
+		ctx:           ctx,
+		cancel:        cancel,
+		cfg:           cfg,
+		start:         startTime,
+		clients:       clients,
+		ranger:        NewAmassRanger(),
+		ps:            pubsub.NewLogger(),
+		stats:         new(et.SessionStats),
+		done:          make(chan struct{}),
+		numOfSess:     numOfSessions,
 		netSemaphore:  NewSessSemaphore(amassnet.MaxNetworkConns / numOfSessions),
 		scanSemaphore: NewSessSemaphore(amassnet.MaxScanConns),
 	}

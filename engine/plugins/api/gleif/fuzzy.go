@@ -44,8 +44,11 @@ func (fc *fuzzyCompletions) check(e *et.Event) error {
 	if support.AssetMonitoredWithinTTL(e.Session, e.Entity, fc.plugin.source, since) {
 		id = fc.lookup(e, e.Entity, since)
 	} else {
-		id = fc.query(e, e.Entity)
-		support.MarkAssetMonitored(e.Session, e.Entity, fc.plugin.source)
+		var completed bool
+		id, completed = fc.query(e, e.Entity)
+		if completed {
+			support.MarkAssetMonitored(e.Session, e.Entity, fc.plugin.source)
+		}
 	}
 
 	if id != nil {
@@ -73,16 +76,23 @@ func (fc *fuzzyCompletions) lookup(e *et.Event, orgent *dbt.Entity, since time.T
 	return nil
 }
 
-func (fc *fuzzyCompletions) query(e *et.Event, orgent *dbt.Entity) *dbt.Entity {
+// query also reports whether GLEIF answered every request it needed;
+// check() marks the organization monitored only then. "No match" is an
+// answer (ErrGLEIFNotFound); a failed request is not.
+func (fc *fuzzyCompletions) query(e *et.Event, orgent *dbt.Entity) (*dbt.Entity, bool) {
 	var conf int
 	var rec *LEIRecord
+	var failures []string
 
 	if leient := fc.plugin.orgEntityToLEI(e, orgent); leient != nil {
 		lei := leient.Asset.(*oamgen.Identifier)
 
-		if r, err := GLEIFGetLEIRecord(e.Session.Ctx(), lei.ID); err == nil {
+		r, err := GLEIFGetLEIRecord(e.Session.Ctx(), lei.ID)
+		if err == nil {
 			rec = r
 			conf = 100
+		} else if !errors.Is(err, ErrGLEIFNotFound) {
+			failures = append(failures, err.Error())
 		}
 	}
 
@@ -91,31 +101,47 @@ func (fc *fuzzyCompletions) query(e *et.Event, orgent *dbt.Entity) *dbt.Entity {
 
 		result, err := GLEIFSearchFuzzyCompletions(e.Session.Ctx(), o.Name)
 		if err != nil {
-			e.Session.Log().Error(err.Error(), slog.Group("plugin", "name", fc.plugin.name, "handler", fc.name))
-			return nil
-		}
-
-		m := make(map[string]string)
-		for _, d := range result.Data {
-			if d.Type == "fuzzycompletions" && d.Relationships.LEIRecords.Data.Type == "lei-records" {
-				key := strings.ToLower(d.Attributes.Value)
-				m[key] = d.Relationships.LEIRecords.Data.ID
+			if !errors.Is(err, ErrGLEIFNotFound) {
+				e.Session.Log().Error(err.Error(), slog.Group("plugin", "name", fc.plugin.name, "handler", fc.name))
+				failures = append(failures, err.Error())
 			}
+		} else {
+			m := make(map[string]string)
+			for _, d := range result.Data {
+				if d.Type == "fuzzycompletions" && d.Relationships.LEIRecords.Data.Type == "lei-records" {
+					key := strings.ToLower(d.Attributes.Value)
+					m[key] = d.Relationships.LEIRecords.Data.ID
+				}
+			}
+
+			var ffail []string
+			rec, ffail = filterFuzzyCompletions(e, orgent, o.Name, m)
+			failures = append(failures, ffail...)
 		}
-		rec = filterFuzzyCompletions(e, orgent, o.Name, m)
 	}
 
 	if rec == nil {
+		if len(failures) > 0 {
+			if e.Session.Ctx().Err() == nil {
+				support.LogLookupFailure(fc.plugin.log, fc.plugin.name, "organization "+orgent.ID, strings.Join(failures, "; "))
+			}
+			return nil, false
+		}
 		e.Session.Log().Info("no LEI record found for organization",
 			"org", orgent.ID, slog.Group("plugin", "name", fc.plugin.name, "handler", fc.name))
-		return nil
+		return nil, true
 	}
 
-	return fc.store(e, orgent, rec, conf)
+	ident := fc.store(e, orgent, rec, conf)
+	return ident, ident != nil
 }
 
-func filterFuzzyCompletions(e *et.Event, orgent *dbt.Entity, brand string, m map[string]string) *LEIRecord {
+// filterFuzzyCompletions picks the best-scoring LEI record among the
+// candidates, and returns the errors of the record requests that failed
+// (a candidate GLEIF no longer has is not a failure).
+func filterFuzzyCompletions(e *et.Event, orgent *dbt.Entity, brand string, m map[string]string) (*LEIRecord, []string) {
 	var rec *LEIRecord
+	var failures []string
 	o := orgent.Asset.(*oamorg.Organization)
 
 	var names []string
@@ -123,7 +149,7 @@ func filterFuzzyCompletions(e *et.Event, orgent *dbt.Entity, brand string, m map
 		names = append(names, k)
 	}
 	if len(names) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	if exact, partial, found := org.NameMatch(e.Session, orgent, names); found {
@@ -137,7 +163,11 @@ func filterFuzzyCompletions(e *et.Event, orgent *dbt.Entity, brand string, m map
 			}
 
 			lei := m[match]
-			if r, err := GLEIFGetLEIRecord(e.Session.Ctx(), lei); err == nil {
+			r, err := GLEIFGetLEIRecord(e.Session.Ctx(), lei)
+			if err != nil && !errors.Is(err, ErrGLEIFNotFound) {
+				failures = append(failures, err.Error())
+			}
+			if err == nil {
 				if LocMatch(e, orgent, r) {
 					score += 40
 				}
@@ -169,7 +199,11 @@ func filterFuzzyCompletions(e *et.Event, orgent *dbt.Entity, brand string, m map
 			}
 
 			lei := m[match]
-			if r, err := GLEIFGetLEIRecord(e.Session.Ctx(), lei); err == nil {
+			r, err := GLEIFGetLEIRecord(e.Session.Ctx(), lei)
+			if err != nil && !errors.Is(err, ErrGLEIFNotFound) {
+				failures = append(failures, err.Error())
+			}
+			if err == nil {
 				if LocMatch(e, orgent, r) {
 					score += 40
 				}
@@ -181,7 +215,7 @@ func filterFuzzyCompletions(e *et.Event, orgent *dbt.Entity, brand string, m map
 		}
 	}
 
-	return rec
+	return rec, failures
 }
 
 func (fc *fuzzyCompletions) store(e *et.Event, orgent *dbt.Entity, rec *LEIRecord, conf int) *dbt.Entity {

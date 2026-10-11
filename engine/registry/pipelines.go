@@ -204,7 +204,6 @@ func (r *registry) assertOSINTBypassInvariant(atype oam.AssetType) {
 	}
 }
 
-
 func handlerTask(h *et.Handler) pipeline.TaskFunc {
 	if h == nil || h.Callback == nil {
 		return nil

@@ -33,10 +33,17 @@ import (
 //
 //   - FQDN / HasSLDInScope: subdomains of the apex, plus reverse CNAMEs
 //     (names that point at the apex).
-//   - IPAddress: reverse DNS for the covering IPv4 /24, but only when that
+//   - IPAddress: names seen on the covering IPv4 /24, but only when that
 //     address sits in a netblock attributed to a seed (NetblockOwnedBySeed).
 //     Unattributed cloud/CDN space is never queried. IPv6 is skipped (the
-//     API's CIDR vocabulary is v4 /8 /16 /24).
+//     API's CIDR vocabulary is v4 /8 /16 /24). THC calls this reverse DNS,
+//     but the rows are passive forward DNS (a name once seen resolving to
+//     the address), not PTR records. So only the names are kept: there is
+//     no relation that means "resolved here at some point", a ptr_record
+//     edge would claim a PTR record that may not exist, and a dns_record
+//     edge would present possibly stale data as a current A record. Each
+//     name goes through the FQDN pipeline, which links it to the addresses
+//     it resolves to now.
 //
 // JSON is capped at 200 rows; CSV is what we use. Rate limit is 0.5 req/s
 // after a 250-token burst; CSV costs 3 tokens. We pace at 2s/request and
@@ -54,13 +61,13 @@ type ipTHC struct {
 }
 
 const (
-	thcCSVLimit                  = 50000
-	thcSubdomainsURL             = "https://ip.thc.org/api/v1/subdomains/download"
-	thcCnamesURL                 = "https://ip.thc.org/api/v1/cnames/download"
-	thcRDNSURL                   = "https://ip.thc.org/api/v1/download"
-	maxAcceptableTHCWait         = 45 * time.Second
-	thcHTTPTimeout               = 90 * time.Second
-	thcOwnedLookupTimeout        = 10 * time.Second
+	thcCSVLimit           = 50000
+	thcSubdomainsURL      = "https://ip.thc.org/api/v1/subdomains/download"
+	thcCnamesURL          = "https://ip.thc.org/api/v1/cnames/download"
+	thcRDNSURL            = "https://ip.thc.org/api/v1/download"
+	maxAcceptableTHCWait  = 45 * time.Second
+	thcHTTPTimeout        = 90 * time.Second
+	thcOwnedLookupTimeout = 10 * time.Second
 )
 
 func NewIPTHC() et.Plugin {
@@ -256,26 +263,7 @@ func (t *ipTHC) ipOnOwnedBlock(e *et.Event) bool {
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), thcOwnedLookupTimeout)
 	defer cancel()
 
-	edges, err := e.Session.DB().IncomingEdges(ctx, e.Entity, time.Time{}, "contains")
-	if err != nil {
-		return false
-	}
-	for _, edge := range edges {
-		if edge.FromEntity == nil {
-			continue
-		}
-		ent, err := e.Session.DB().FindEntityById(ctx, edge.FromEntity.ID)
-		if err != nil || ent == nil {
-			continue
-		}
-		if _, ok := ent.Asset.(*oamnet.Netblock); !ok {
-			continue
-		}
-		if yes, _ := support.NetblockOwnedBySeed(ctx, e.Session, ent); yes {
-			return true
-		}
-	}
-	return false
+	return support.IPInOwnedNetblock(ctx, e.Session, e.Entity)
 }
 
 func v4slash24(addr netip.Addr) (string, bool) {
