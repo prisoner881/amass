@@ -54,13 +54,13 @@ type ipTHC struct {
 }
 
 const (
-	thcCSVLimit                  = 50000
-	thcSubdomainsURL             = "https://ip.thc.org/api/v1/subdomains/download"
-	thcCnamesURL                 = "https://ip.thc.org/api/v1/cnames/download"
-	thcRDNSURL                   = "https://ip.thc.org/api/v1/download"
-	maxAcceptableTHCWait         = 45 * time.Second
-	thcHTTPTimeout               = 90 * time.Second
-	thcOwnedLookupTimeout        = 10 * time.Second
+	thcCSVLimit           = 50000
+	thcSubdomainsURL      = "https://ip.thc.org/api/v1/subdomains/download"
+	thcCnamesURL          = "https://ip.thc.org/api/v1/cnames/download"
+	thcRDNSURL            = "https://ip.thc.org/api/v1/download"
+	maxAcceptableTHCWait  = 45 * time.Second
+	thcHTTPTimeout        = 90 * time.Second
+	thcOwnedLookupTimeout = 10 * time.Second
 )
 
 func NewIPTHC() et.Plugin {

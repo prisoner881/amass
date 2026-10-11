@@ -353,3 +353,36 @@ func TestCountsMultiState(t *testing.T) {
 	assert.Equal(t, int64(1), leased) // q1
 	assert.Equal(t, int64(1), done)   // d1
 }
+
+// With a ttl of zero a lease is never reclaimed, even once lease_until has
+// passed; a positive ttl reclaims it.
+func TestClaimNextZeroTTLNeverReclaims(t *testing.T) {
+	db, _ := openTestBacklog(t)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	eid := "entity-zero-ttl"
+	require.NoError(t, db.Enqueue(ctx, oam.FQDN, eid))
+
+	claims, err := db.ClaimNext(ctx, oam.FQDN, "ownerA", 1, 0)
+	require.NoError(t, err)
+	require.Len(t, claims, 1)
+
+	var until int64
+	require.NoError(t, db.db.QueryRowContext(ctx,
+		`SELECT lease_until FROM backlog_items WHERE entity_id = ?`, eid).Scan(&until))
+	assert.InDelta(t, nowUnix()+30, until, 2, "lease_until is set 30s ahead")
+
+	// Move the lease into the past.
+	_, err = db.db.ExecContext(ctx, `UPDATE backlog_items SET lease_until = ? WHERE entity_id = ?`, nowUnix()-60, eid)
+	require.NoError(t, err)
+
+	claims2, err := db.ClaimNext(ctx, oam.FQDN, "ownerB", 1, 0)
+	require.NoError(t, err)
+	assert.Len(t, claims2, 0, "a zero ttl must not reclaim an expired lease")
+
+	claims3, err := db.ClaimNext(ctx, oam.FQDN, "ownerB", 1, time.Minute)
+	require.NoError(t, err)
+	assert.Len(t, claims3, 1, "a positive ttl reclaims the expired lease")
+}

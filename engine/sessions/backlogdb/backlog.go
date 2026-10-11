@@ -111,11 +111,15 @@ func (b *BacklogDB) ClaimNext(ctx context.Context, atype oam.AssetType, owner st
 
 	now := nowUnix()
 	key := string(atype)
-	leaseUntil := now + int64(ttl.Seconds())
-	if ttl <= 0 {
-		ttl := 30 * time.Second
-		leaseUntil = now + int64(ttl.Seconds())
+	// A ttl of zero or less means a lease is never reclaimed: the claim query
+	// below then selects queued items only (sessions run this way, see
+	// SetLeaseTTL(0) in sessions/session.go). lease_until is still set 30s
+	// ahead in that mode, as it always has been.
+	leaseFor := ttl
+	if leaseFor <= 0 {
+		leaseFor = 30 * time.Second
 	}
+	leaseUntil := now + int64(leaseFor.Seconds())
 
 	// IMPORTANT: Use a single connection + explicit BEGIN IMMEDIATE to avoid
 	// "cannot start a transaction within a transaction" and to make claim atomic.
