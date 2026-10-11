@@ -140,6 +140,13 @@ datasources:
 #    creds:
 #      account: 
 #        apikey: null
+#  - name: Prospeo
+#    options:
+#      max_emails_per_domain: 25 # people enriched per domain; 0 turns Prospeo off
+#      min_remaining_credits: 0 # credits Prospeo never spends
+#    creds:
+#      account: 
+#        apikey: null
 #  - name: PublicWWW
 #    ttl: 10080
 #    creds:
