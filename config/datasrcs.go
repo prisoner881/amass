@@ -17,6 +17,20 @@ type DataSource struct {
 	Name  string                  `yaml:"name,omitempty" json:"name,omitempty"`
 	TTL   int                     `yaml:"ttl,omitempty" json:"ttl,omitempty"`
 	Creds map[string]*Credentials `yaml:"creds,omitempty" json:"creds,omitempty"`
+	// Options holds source-specific integer settings, such as a credit
+	// budget, read by the source's plugin through IntOption.
+	Options map[string]int `yaml:"options,omitempty" json:"options,omitempty"`
+}
+
+// IntOption returns the named option, or def when the source does not set it.
+func (ds *DataSource) IntOption(name string, def int) int {
+	if ds == nil {
+		return def
+	}
+	if v, ok := ds.Options[name]; ok {
+		return v
+	}
+	return def
 }
 
 // Credentials contains values required for authenticating with web APIs.
