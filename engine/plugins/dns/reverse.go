@@ -8,6 +8,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"net/netip"
+	"strconv"
 	"strings"
 	"time"
 
@@ -84,6 +86,7 @@ func (d *dnsReverse) check(e *et.Event) error {
 
 	if len(rev) > 0 {
 		support.AddDNSRecordType(e, int(dns.TypePTR))
+		d.attributeOwned(e, ip, rev, !monitored)
 		d.process(e, rev)
 
 		// PTR-triggered sweeping was removed here, not fixed to use
@@ -246,4 +249,125 @@ func (d *dnsReverse) process(e *et.Event, rev []*relRev) {
 		e.Session.Log().Info("relationship discovered", "from", ip.Name, "relation", "dns_record",
 			"to", target.Name, slog.Group("plugin", "name", d.plugin.name, "handler", d.name))
 	}
+}
+
+// attributeOwned links the in-scope PTR names of an IP in a seed-owned
+// netblock directly to that IP, so the name is attributed to the address
+// without walking the in-addr.arpa chain:
+//
+//   - IP -ptr_record-> host, alongside the existing chain
+//     IP -ptr_record-> <ip>.in-addr.arpa -dns_record(PTR)-> host.
+//   - apex -node-> host, so domain queries list the name even when it has
+//     no forward DNS record. The apex handler creates this edge only for
+//     names that resolved. Generic names that spell out the address
+//     (10-1-2-3.dhcp.example.com) get no node edge: every address in a
+//     block usually has one, and they would flood the subdomain list.
+//
+// Both checks must pass (the owned block and the in-scope name), so names
+// in other address space are untouched. With refresh false (the PTR data
+// came from the database, not a query), existing edges are left as they
+// are and only missing ones are created, so their last-seen times still
+// reflect the last real lookup.
+func (d *dnsReverse) attributeOwned(e *et.Event, ip *oamnet.IPAddress, rev []*relRev, refresh bool) {
+	var names []*dbt.Entity
+	for _, r := range rev {
+		if fqdn, ok := r.target.Asset.(*oamdns.FQDN); ok {
+			if _, conf := e.Session.Scope().IsAssetInScope(fqdn, 0); conf > 0 {
+				names = append(names, r.target)
+			}
+		}
+	}
+	if len(names) == 0 {
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 15*time.Second)
+	defer cancel()
+
+	if !support.IPInOwnedNetblock(ctx, e.Session, e.Entity) {
+		return
+	}
+
+	linked := make(map[string]bool)
+	if !refresh {
+		if edges, err := e.Session.DB().OutgoingEdges(ctx, e.Entity, time.Time{}, "ptr_record"); err == nil {
+			for _, edge := range edges {
+				if edge.ToEntity != nil {
+					linked[edge.ToEntity.ID] = true
+				}
+			}
+		}
+	}
+
+	for _, t := range names {
+		name := t.Asset.Key()
+
+		if !linked[t.ID] {
+			if edge, err := e.Session.DB().CreateEdge(ctx, &dbt.Edge{
+				Relation:   &general.SimpleRelation{Name: "ptr_record"},
+				FromEntity: e.Entity,
+				ToEntity:   t,
+			}); err == nil && edge != nil {
+				_, _ = e.Session.DB().CreateEdgeProperty(ctx, edge, &general.SourceProperty{
+					Source:     d.plugin.source.Name,
+					Confidence: d.plugin.source.Confidence,
+				})
+				e.Session.Log().Info("owned-block PTR name linked to its address", "from", ip.Address.String(),
+					"relation", "ptr_record", "to", name, slog.Group("plugin", "name", d.plugin.name, "handler", d.name))
+			}
+		}
+
+		if ptrNameEmbedsAddress(name, ip.Address) {
+			continue
+		}
+		apex := d.plugin.apexOf(name)
+		if apex == nil {
+			continue
+		}
+		if !refresh {
+			if edges, err := e.Session.DB().IncomingEdges(ctx, t, time.Time{}, "node"); err == nil && len(edges) > 0 {
+				continue
+			}
+		}
+		if _, err := e.Session.DB().CreateEdge(ctx, &dbt.Edge{
+			Relation:   &general.SimpleRelation{Name: "node"},
+			FromEntity: apex,
+			ToEntity:   t,
+		}); err == nil {
+			e.Session.Log().Info("relationship discovered", "from", apex.Asset.Key(), "relation",
+				"node", "to", name, slog.Group("plugin", "name", d.plugin.name, "handler", d.name))
+		}
+	}
+}
+
+// ptrNameEmbedsAddress reports whether an IPv4 address appears in the name
+// as four consecutive numbers, in either order: 10-1-2-3.example.com,
+// host-3-2-1-10.example.com, ip10.1.2.3.example.com.
+func ptrNameEmbedsAddress(name string, addr netip.Addr) bool {
+	if !addr.Is4() {
+		return false
+	}
+	a4 := addr.As4()
+
+	var nums []int
+	for _, f := range strings.FieldsFunc(name, func(r rune) bool { return r < '0' || r > '9' }) {
+		if len(f) > 3 {
+			nums = append(nums, -1)
+			continue
+		}
+		n, _ := strconv.Atoi(f)
+		nums = append(nums, n)
+	}
+
+	for i := 0; i+4 <= len(nums); i++ {
+		fwd, rev := true, true
+		for j := 0; j < 4; j++ {
+			fwd = fwd && nums[i+j] == int(a4[j])
+			rev = rev && nums[i+j] == int(a4[3-j])
+		}
+		if fwd || rev {
+			return true
+		}
+	}
+	return false
 }

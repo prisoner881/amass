@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
@@ -61,12 +62,24 @@ func (h *horaddr) lookupPTRRecordName(sess et.Session, ip *dbt.Entity) (*dbt.Ent
 		return nil, fmt.Errorf("no PTR records found for %s", ip.Asset.Key())
 	}
 
-	ptr, err := sess.DB().FindEntityById(ctx, edges[0].ToEntity.ID)
-	if err != nil {
-		return nil, fmt.Errorf("failed to acquire the entity with ID: %s", edges[0].ToEntity.ID)
+	// An IP can also have ptr_record edges straight to a host name (owned-block
+	// attribution in dns/reverse.go, URLScan's page.ptr). The PTR data hangs
+	// off the in-addr.arpa / ip6.arpa name, so use that edge.
+	for _, edge := range edges {
+		if edge.ToEntity == nil {
+			continue
+		}
+		ptr, err := sess.DB().FindEntityById(ctx, edge.ToEntity.ID)
+		if err != nil || ptr == nil {
+			continue
+		}
+		if name, ok := ptr.Asset.(*oamdns.FQDN); ok &&
+			(strings.HasSuffix(name.Name, ".in-addr.arpa") || strings.HasSuffix(name.Name, ".ip6.arpa")) {
+			return ptr, nil
+		}
 	}
 
-	return ptr, nil
+	return nil, fmt.Errorf("no reverse DNS name found for %s", ip.Asset.Key())
 }
 
 func (h *horaddr) lookupPTRRecordData(sess et.Session, ptr *dbt.Entity) (*dbt.Entity, error) {

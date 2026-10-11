@@ -71,6 +71,39 @@ func NetblockOwnedBySeed(ctx context.Context, session et.Session, nb *dbt.Entity
 	return false, ""
 }
 
+// IPInOwnedNetblock is true when a netblock containing the IP (an
+// incoming "contains" edge) is attributed to a seed by NetblockOwnedBySeed.
+// It fails closed on any lookup error.
+func IPInOwnedNetblock(ctx context.Context, session et.Session, ip *dbt.Entity) bool {
+	if session == nil || ip == nil {
+		return false
+	}
+	if _, ok := ip.Asset.(*oamnet.IPAddress); !ok {
+		return false
+	}
+
+	edges, err := session.DB().IncomingEdges(ctx, ip, time.Time{}, "contains")
+	if err != nil {
+		return false
+	}
+	for _, edge := range edges {
+		if edge.FromEntity == nil {
+			continue
+		}
+		ent, err := session.DB().FindEntityById(ctx, edge.FromEntity.ID)
+		if err != nil || ent == nil {
+			continue
+		}
+		if _, ok := ent.Asset.(*oamnet.Netblock); !ok {
+			continue
+		}
+		if yes, _ := NetblockOwnedBySeed(ctx, session, ent); yes {
+			return true
+		}
+	}
+	return false
+}
+
 func seedContactEmail(ctx context.Context, session et.Session, ipnet *dbt.Entity) (string, bool) {
 	edges, err := session.DB().OutgoingEdges(ctx, ipnet, time.Time{},
 		"registrant", "admin_contact", "abuse_contact", "technical_contact")
