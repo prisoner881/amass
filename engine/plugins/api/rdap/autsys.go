@@ -7,6 +7,7 @@ package rdap
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -46,8 +47,11 @@ func (r *autsys) check(e *et.Event) error {
 	if support.AssetMonitoredWithinTTL(e.Session, e.Entity, r.plugin.source, since) {
 		asset = r.lookup(e, as.Number, since)
 	} else {
-		asset, record = r.query(e, e.Entity)
-		support.MarkAssetMonitored(e.Session, e.Entity, r.plugin.source)
+		var completed bool
+		asset, record, completed = r.query(e, e.Entity)
+		if completed {
+			support.MarkAssetMonitored(e.Session, e.Entity, r.plugin.source)
+		}
 	}
 
 	if asset != nil {
@@ -80,8 +84,12 @@ func (r *autsys) lookup(e *et.Event, num int, since time.Time) *dbt.Entity {
 	return nil
 }
 
-func (r *autsys) query(e *et.Event, asset *dbt.Entity) (*dbt.Entity, *rdap.Autnum) {
-	_ = r.plugin.rlimit.Wait(e.Session.Ctx())
+// query also reports whether RDAP answered (see rdapLookupFailure); check()
+// marks the autonomous system monitored only then.
+func (r *autsys) query(e *et.Event, asset *dbt.Entity) (*dbt.Entity, *rdap.Autnum, bool) {
+	if err := r.plugin.rlimit.Wait(e.Session.Ctx()); err != nil {
+		return nil, nil, false
+	}
 
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 3*time.Minute)
 	defer cancel()
@@ -91,14 +99,18 @@ func (r *autsys) query(e *et.Event, asset *dbt.Entity) (*dbt.Entity, *rdap.Autnu
 
 	resp, err := r.plugin.client.Do(req)
 	if err != nil {
-		return nil, nil
+		reason := rdapLookupFailure(err)
+		if reason != "" && e.Session.Ctx().Err() == nil {
+			support.LogLookupFailure(r.plugin.log, r.plugin.name, fmt.Sprintf("AS%d", as.Number), reason)
+		}
+		return nil, nil, reason == ""
 	}
 
 	record, ok := resp.Object.(*rdap.Autnum)
 	if !ok {
-		return nil, nil
+		return nil, nil, true
 	}
-	return r.store(e, record, asset), record
+	return r.store(e, record, asset), record, true
 }
 
 func (r *autsys) store(e *et.Event, resp *rdap.Autnum, asset *dbt.Entity) *dbt.Entity {

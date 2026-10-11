@@ -55,8 +55,11 @@ func (r *fqdnLookup) check(e *et.Event) error {
 	if support.AssetMonitoredWithinTTL(e.Session, e.Entity, src, since) {
 		asset = r.lookup(e, fqdn.Name, since)
 	} else {
-		asset, record = r.query(e, fqdn.Name, e.Entity, src)
-		support.MarkAssetMonitored(e.Session, e.Entity, src)
+		var completed bool
+		asset, record, completed = r.query(e, fqdn.Name, e.Entity, src)
+		if completed {
+			support.MarkAssetMonitored(e.Session, e.Entity, src)
+		}
 	}
 
 	if asset != nil {
@@ -95,16 +98,54 @@ func (r *fqdnLookup) lookup(e *et.Event, name string, since time.Time) *dbt.Enti
 // created here, and domain_record.go's contact extraction - see
 // identical structure and shape regardless of which source actually
 // answered.
-func (r *fqdnLookup) query(e *et.Event, name string, fent *dbt.Entity, src *et.Source) (*dbt.Entity, *whoisparser.WhoisInfo) {
-	if info, raw, err := r.plugin.queryRDAP(e, name); err == nil && info != nil {
-		return r.storeRecord(e, info, raw, fent, r.plugin.rdapSource)
+//
+// It also reports whether the lookup completed; check() marks the domain
+// monitored only then. It completed when either source returned a record
+// that was stored, or when the registry answered that the domain has no
+// record (an RDAP 404, or see whoisAnswered). A failure of both sources, or
+// a record that could not be stored, leaves the domain unmarked for a
+// retry.
+func (r *fqdnLookup) query(e *et.Event, name string, fent *dbt.Entity, src *et.Source) (*dbt.Entity, *whoisparser.WhoisInfo, bool) {
+	info, raw, rerr := r.plugin.queryRDAP(e, name)
+	if rerr == nil && info != nil {
+		asset, rec := r.storeRecord(e, info, raw, fent, r.plugin.rdapSource)
+		return asset, rec, asset != nil
 	}
 
-	info, raw, err := r.queryWHOIS(e, name)
-	if err != nil || info == nil {
-		return nil, nil
+	info, raw, werr := r.queryWHOIS(e, name)
+	if werr == nil && info != nil {
+		asset, rec := r.storeRecord(e, info, raw, fent, src)
+		return asset, rec, asset != nil
 	}
-	return r.storeRecord(e, info, raw, fent, src)
+	// The registry has no record of the domain: answered by WHOIS, or by
+	// RDAP when the WHOIS fallback found nothing either (many registries
+	// no longer run port-43 WHOIS, so its failure is no reason to retry).
+	if whoisAnswered(werr) || errors.Is(rerr, errRDAPNotFound) {
+		return nil, nil, true
+	}
+
+	if e.Session.Ctx().Err() == nil {
+		support.LogLookupFailure(r.plugin.log, r.plugin.name, name, fmt.Sprintf("RDAP: %v; WHOIS: %v", rerr, werr))
+	}
+	return nil, nil, false
+}
+
+// errWHOISDomainMismatch is returned when the WHOIS record is for another
+// domain than the one asked for.
+var errWHOISDomainMismatch = errors.New("WHOIS: parsed domain does not match the query")
+
+// whoisAnswered reports whether a WHOIS error is still the server's answer
+// for the domain, one a retry cannot change: not registered, reserved,
+// premium, blocked, or a record for another domain. A query limit
+// (ErrDomainLimitExceed), an unparseable reply (ErrDomainDataInvalid, which
+// is also how a throttling notice parses), an empty reply, a timeout or a
+// skipped call are not.
+func whoisAnswered(err error) bool {
+	return errors.Is(err, whoisparser.ErrNotFoundDomain) ||
+		errors.Is(err, whoisparser.ErrReservedDomain) ||
+		errors.Is(err, whoisparser.ErrPremiumDomain) ||
+		errors.Is(err, whoisparser.ErrBlockedDomain) ||
+		errors.Is(err, errWHOISDomainMismatch)
 }
 
 // queryWHOIS respects WHOIS-server-friendly pacing via a bounded wait,
@@ -173,14 +214,17 @@ func (r *fqdnLookup) queryWHOIS(e *et.Event, name string) (*whoisparser.WhoisInf
 		return nil, "", err
 	}
 	if !strings.EqualFold(info.Domain.Domain, name) {
-		return nil, "", fmt.Errorf("WHOIS: parsed domain %q does not match %q", info.Domain.Domain, name)
+		return nil, "", fmt.Errorf("%w: %q is not %q", errWHOISDomainMismatch, info.Domain.Domain, name)
 	}
 
 	return &info, resp, nil
 }
 
+// whoisQuery performs the port-43 WHOIS query; tests replace it.
+var whoisQuery = func(name string) (string, error) { return whoisclient.Whois(name) }
+
 func (r *fqdnLookup) whoisRoutine(sess et.Session, name string, ch chan string) {
-	resp, err := whoisclient.Whois(name)
+	resp, err := whoisQuery(name)
 	if err != nil {
 		resp = ""
 		msg := fmt.Sprintf("failed to acquire the WHOIS record for %s", name)

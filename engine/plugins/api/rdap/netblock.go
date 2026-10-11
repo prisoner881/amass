@@ -48,8 +48,11 @@ func (nb *netblock) check(e *et.Event) error {
 	if support.AssetMonitoredWithinTTL(e.Session, e.Entity, nb.plugin.source, since) {
 		asset = nb.lookup(e, n.CIDR.String(), since)
 	} else {
-		asset, record = nb.query(e, e.Entity)
-		support.MarkAssetMonitored(e.Session, e.Entity, nb.plugin.source)
+		var completed bool
+		asset, record, completed = nb.query(e, e.Entity)
+		if completed {
+			support.MarkAssetMonitored(e.Session, e.Entity, nb.plugin.source)
+		}
 	}
 
 	if asset != nil {
@@ -82,8 +85,12 @@ func (nb *netblock) lookup(e *et.Event, cidr string, since time.Time) *dbt.Entit
 	return nil
 }
 
-func (nb *netblock) query(e *et.Event, asset *dbt.Entity) (*dbt.Entity, *rdap.IPNetwork) {
-	_ = nb.plugin.rlimit.Wait(e.Session.Ctx())
+// query also reports whether RDAP answered (see rdapLookupFailure); check()
+// marks the netblock monitored only then.
+func (nb *netblock) query(e *et.Event, asset *dbt.Entity) (*dbt.Entity, *rdap.IPNetwork, bool) {
+	if err := nb.plugin.rlimit.Wait(e.Session.Ctx()); err != nil {
+		return nil, nil, false
+	}
 
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 3*time.Minute)
 	defer cancel()
@@ -91,20 +98,24 @@ func (nb *netblock) query(e *et.Event, asset *dbt.Entity) (*dbt.Entity, *rdap.IP
 	n := asset.Asset.(*network.Netblock)
 	_, ipnet, err := net.ParseCIDR(n.CIDR.String())
 	if err != nil {
-		return nil, nil
+		return nil, nil, true
 	}
 	req := rdap.NewIPNetRequest(ipnet).WithContext(ctx)
 
 	resp, err := nb.plugin.client.Do(req)
 	if err != nil {
-		return nil, nil
+		reason := rdapLookupFailure(err)
+		if reason != "" && e.Session.Ctx().Err() == nil {
+			support.LogLookupFailure(nb.plugin.log, nb.plugin.name, n.CIDR.String(), reason)
+		}
+		return nil, nil, reason == ""
 	}
 
 	record, ok := resp.Object.(*rdap.IPNetwork)
 	if !ok {
-		return nil, nil
+		return nil, nil, true
 	}
-	return nb.store(e, record, asset), record
+	return nb.store(e, record, asset), record, true
 }
 
 func (nb *netblock) store(e *et.Event, resp *rdap.IPNetwork, asset *dbt.Entity) *dbt.Entity {

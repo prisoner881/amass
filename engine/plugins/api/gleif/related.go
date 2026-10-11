@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
@@ -42,8 +43,11 @@ func (ro *relatedOrgs) check(e *et.Event) error {
 	if support.AssetMonitoredWithinTTL(e.Session, e.Entity, ro.plugin.source, since) {
 		orgs = append(orgs, ro.lookup(e, e.Entity, since)...)
 	} else {
-		orgs = append(orgs, ro.query(e, e.Entity)...)
-		support.MarkAssetMonitored(e.Session, e.Entity, ro.plugin.source)
+		found, completed := ro.query(e, e.Entity)
+		orgs = append(orgs, found...)
+		if completed {
+			support.MarkAssetMonitored(e.Session, e.Entity, ro.plugin.source)
+		}
 	}
 
 	if len(orgs) > 0 {
@@ -114,11 +118,37 @@ func (ro *relatedOrgs) lookup(e *et.Event, ident *dbt.Entity, since time.Time) [
 	return results
 }
 
-func (ro *relatedOrgs) query(e *et.Event, ident *dbt.Entity) []*dbt.Entity {
+// query also reports whether GLEIF answered both the parent and the
+// children requests; check() marks the LEI monitored only then. No parent
+// or no children (ErrGLEIFNotFound) is an answer. What was received is
+// stored either way.
+func (ro *relatedOrgs) query(e *et.Event, ident *dbt.Entity) ([]*dbt.Entity, bool) {
 	id := ident.Asset.(*oamgen.Identifier)
-	parent, _ := GLEIFGetDirectParentRecord(e.Session.Ctx(), id.ID)
-	children, _ := GLEIFGetDirectChildrenRecords(e.Session.Ctx(), id.ID)
-	return ro.store(e, ident, parent, children)
+
+	var failures []string
+	parent, err := GLEIFGetDirectParentRecord(e.Session.Ctx(), id.ID)
+	if err != nil {
+		parent = nil
+		if !errors.Is(err, ErrGLEIFNotFound) {
+			failures = append(failures, "direct parent: "+err.Error())
+		}
+	}
+	children, err := GLEIFGetDirectChildrenRecords(e.Session.Ctx(), id.ID)
+	if err != nil {
+		children = nil
+		if !errors.Is(err, ErrGLEIFNotFound) {
+			failures = append(failures, "direct children: "+err.Error())
+		}
+	}
+
+	orgs := ro.store(e, ident, parent, children)
+	if len(failures) > 0 {
+		if e.Session.Ctx().Err() == nil {
+			support.LogLookupFailure(ro.plugin.log, ro.plugin.name, "LEI "+id.ID, strings.Join(failures, "; "))
+		}
+		return orgs, false
+	}
+	return orgs, true
 }
 
 func (ro *relatedOrgs) store(e *et.Event, ident *dbt.Entity, parent *LEIRecord, children []*LEIRecord) []*dbt.Entity {
