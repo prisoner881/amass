@@ -205,6 +205,13 @@ type urlscanResponse struct {
 // that, not a short cutoff meant for a much slower limiter.
 const maxAcceptableURLScanWait = 45 * time.Second
 
+// urlscanUserAgent replaces the browser User-Agent Amass sends by default.
+// urlscan.io answers API requests that claim to be a browser with HTTP 429
+// before it checks the API key (nothing reaches the key's quota or
+// activity log), while the same request with a plain client User-Agent is
+// served under the key's own limits.
+const urlscanUserAgent = "OWASP-Amass/5 (+https://github.com/owasp-amass/amass)"
+
 // query reports whether urlscan.io answered; checkFQDN marks the name
 // monitored only then, so a rejected key, an exhausted quota or a skipped
 // call is retried by the next session.
@@ -234,8 +241,12 @@ func (u *urlscan) query(e *et.Event, q, key string) bool {
 	params.Set("q", q)
 
 	resp, err := amasshttp.RequestWebPage(ctx, e.Session.Clients().General, &amasshttp.Request{
-		URL:    "https://urlscan.io/api/v1/search/?" + params.Encode(),
-		Header: amasshttp.Header{"API-Key": []string{key}},
+		URL: "https://urlscan.io/api/v1/search/?" + params.Encode(),
+		Header: amasshttp.Header{
+			"API-Key":    []string{key},
+			"User-Agent": []string{urlscanUserAgent},
+			"Accept":     []string{"application/json"},
+		},
 	})
 	e.Session.NetSem().Release()
 	if reason := support.HTTPLookupFailure(resp, err); reason != "" {

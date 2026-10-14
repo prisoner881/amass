@@ -41,6 +41,7 @@ type fakeTransport struct {
 	mu    sync.Mutex
 	resps []fakeResp
 	calls int
+	last  *http.Request
 }
 
 func (f *fakeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -48,6 +49,7 @@ func (f *fakeTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	defer f.mu.Unlock()
 	r := f.resps[min(f.calls, len(f.resps)-1)]
 	f.calls++
+	f.last = req
 	return &http.Response{
 		StatusCode: r.status,
 		Status:     http.StatusText(r.status),
