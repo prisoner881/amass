@@ -37,7 +37,9 @@ var pluginNewFuncs = []func() et.Plugin{
 	api.NewIPTHC,
 	//api.NewHunterIO,
 	api.NewLeakIX,
-	api.NewPassiveTotal,
+	// PassiveTotal: never sent a request (passivetotal.go's query loop does not
+	// run), and RiskIQ's PassiveTotal API went to Microsoft with RiskIQ.
+	//api.NewPassiveTotal,
 	api.NewProspeo,
 	api.NewSecurityTrails,
 	api.NewSubdomainCenter,
