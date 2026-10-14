@@ -230,7 +230,8 @@ func (r *netblock) store(e *et.Event, cidr netip.Prefix, ip *dbt.Entity, asn int
 	// AdmitOwnedNetblock / FinishOwnedNetblockFills (ownership-gated,
 	// not size-gated); individual in-scope-resolving IPs are authorized
 	// independently in dns/ip.go.
-	if support.PrefixEligibleForAmbientAdmit(netblock.CIDR) {
+	// Both conditions are required: see ip_netblock.go.
+	if support.PrefixEligibleForAmbientAdmit(netblock.CIDR) && support.HasInScopeFQDN(ctx, e.Session, ip) {
 		e.Session.Scope().Add(netblock)
 	}
 	support.AdmitOwnedNetblock(e, nb)

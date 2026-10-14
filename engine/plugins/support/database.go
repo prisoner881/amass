@@ -256,6 +256,20 @@ func ResolvingFQDNs(ctx context.Context, session et.Session, ent *dbt.Entity) []
 	return fqdns
 }
 
+// HasInScopeFQDN reports whether an in-scope FQDN has a dns_record edge
+// (an A or AAAA answer) to ent, an IPAddress. It is half of the gate for
+// admitting a netblock to scope on the ambiguous path in ip_netblock.go and
+// whois/bgptools/netblock.go; PrefixEligibleForAmbientAdmit is the other
+// half. A PTR record alone does not count.
+func HasInScopeFQDN(ctx context.Context, session et.Session, ent *dbt.Entity) bool {
+	for _, fqdn := range ResolvingFQDNs(ctx, session, ent) {
+		if _, conf := session.Scope().IsAssetInScope(fqdn, 0); conf > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // PreferredSNIHostname picks the best available hostname to present
 // via SNI when initiating a raw TLS handshake against a bare IP -
 // preferring one that's confirmed in scope (most likely the actual,

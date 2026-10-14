@@ -155,7 +155,14 @@ func (d *ipNetblock) store(e *et.Event, entry *sessions.CIDRangerEntry) (*dbt.En
 	// independently of its enclosing netblock (see the provenance
 	// authorization in dns/ip.go), so declining to scope a large
 	// ambiguous block here does not lose target hosts inside it.
-	if support.PrefixEligibleForAmbientAdmit(netblock.CIDR) {
+	//
+	// Both conditions are required. From 09-21 the size gate replaced
+	// the in-scope-name check instead of being added to it, so every
+	// small block the pipeline touched was admitted: a CDN or SaaS /24
+	// that an out-of-scope link or CNAME target resolved into. Its RDAP
+	// registrant organization then counted as in scope for horizontals,
+	// which pulled in that organization's own domains.
+	if support.PrefixEligibleForAmbientAdmit(netblock.CIDR) && support.HasInScopeFQDN(ctx, e.Session, e.Entity) {
 		e.Session.Scope().Add(netblock)
 	}
 	support.AdmitOwnedNetblock(e, nb)

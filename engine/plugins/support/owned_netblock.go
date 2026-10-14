@@ -172,11 +172,11 @@ func PrefixEligibleForFill(p netip.Prefix) bool {
 // possibly-shared infrastructure, too large to scan on a weak signal,
 // whereas a genuinely owned block of any size still reaches scope via
 // the ownership path (AdmitOwnedNetblock / FinishOwnedNetblockFills),
-// which is not size-gated. Replaces the previous resolution-based
-// admission (support.HasInScopeFQDN), which admitted a netblock of any
-// size - up to entire cloud-provider /10s and /11s - whenever a single
-// in-scope name merely resolved into it, because scope containment then
-// marked every address in that range in scope. Individual IPs that an
+// which is not size-gated. The callers also require HasInScopeFQDN (an
+// in-scope name resolves to the IP): without the size limit that check
+// admitted entire cloud-provider /10s and /11s whenever one in-scope name
+// resolved into them, and without that check the size limit admits every
+// small block any out-of-scope name resolves into. Individual IPs that an
 // in-scope FQDN resolves to are authorized for scanning directly and
 // independently (see the provenance authorization in dns/ip.go), so
 // declining to scope the enclosing block here does not lose those

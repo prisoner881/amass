@@ -459,6 +459,11 @@ func (h *horizPlugin) isEntityInScope(sess et.Session, ent *dbt.Entity) bool {
 
 func (h *horizPlugin) addToScopeAndEnqueue(sess et.Session, ent *dbt.Entity) {
 	if sess.Scope().Add(ent.Asset) {
+		// The TLS certificate and registration record handlers add assets
+		// here without an association rationale, so record each one.
+		sess.Log().Info("asset added to the session scope by horizontals",
+			"type", string(ent.Asset.AssetType()), "asset", ent.Asset.Key(),
+			slog.Group("plugin", "name", h.name))
 		if econf := h.confidence(sess, ent.Asset.AssetType()); econf > 0 {
 			if a, conf := sess.Scope().IsAssetInScope(ent.Asset, econf); conf >= econf {
 				if strings.EqualFold(a.Key(), ent.Asset.Key()) {
