@@ -169,3 +169,28 @@ func TestIsValidPTRHostname(t *testing.T) {
 		}
 	}
 }
+
+// urlscan.io rejects API requests carrying a browser User-Agent with HTTP
+// 429 before it reads the key, so the plugin must not send Amass's default
+// one.
+func TestURLScanSendsClientUserAgent(t *testing.T) {
+	e, ft := newMarkTestEvent(t, fakeResp{200, `{"results":[],"total":0}`})
+	p := NewURLScan().(*urlscan)
+	p.log = discardLog()
+	if err := p.checkFQDN(e); err != nil {
+		t.Fatalf("checkFQDN returned an error: %v", err)
+	}
+	if ft.last == nil {
+		t.Fatal("no request was sent")
+	}
+	h := ft.last.Header
+	if got := h.Get("API-Key"); got != "test-key" {
+		t.Errorf("API-Key = %q, want the configured key", got)
+	}
+	if got := h.Get("User-Agent"); got != urlscanUserAgent || strings.Contains(got, "Mozilla") {
+		t.Errorf("User-Agent = %q, want %q", got, urlscanUserAgent)
+	}
+	if got := h.Get("Accept"); got != "application/json" {
+		t.Errorf("Accept = %q, want application/json", got)
+	}
+}
