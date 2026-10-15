@@ -40,7 +40,7 @@ func JARMFingerprint(sess et.Session, target oam.Asset, portrel *general.PortRel
 
 	// JARM dials the target directly, so it is active traffic and must use
 	// the active egress. ActiveDialer returns an error under active+strict
-	// with no proxy, and fails the session on any proxy failure.
+	// with no proxy.
 	dial, derr := ActiveDialer(sess, 5*time.Second)
 	if derr != nil {
 		return "", derr

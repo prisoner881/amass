@@ -388,12 +388,18 @@ func (c *Client) Subscribe(ctx context.Context, token uuid.UUID) (<-chan string,
 	return ch, nil
 }
 
+// readJSONError returns the server's error message, followed by its details
+// when present (e.g. why a session could not be created).
 func readJSONError(content string) (string, error) {
 	var errResp struct {
 		Message string `json:"error"`
+		Details string `json:"details"`
 	}
 	if err := json.Unmarshal([]byte(content), &errResp); err != nil {
 		return "", err
+	}
+	if errResp.Details != "" {
+		return errResp.Message + ": " + errResp.Details, nil
 	}
 	return errResp.Message, nil
 }

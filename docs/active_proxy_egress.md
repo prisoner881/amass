@@ -17,11 +17,16 @@ reconnaissance signal.
 ## The guarantee
 
 When an `active_proxy` is configured, active traffic goes through it or not at
-all. There is no fallback to the default network. If the proxy cannot be
-reached — at start-up or on any single connection mid-run — the enumeration
-**stops immediately** with an error on the console and in the log. A target's
-own answer relayed through a working proxy (connection refused, unreachable) is
-an ordinary scan result and does not stop the run.
+all. There is no fallback to the default network.
+
+- **At start-up** the engine checks the proxy before dispatching any work. If
+  the proxy cannot be reached or will not relay, the session is refused with an
+  error.
+- **Mid-run** the engine does not watch the proxy. If it fails, active
+  operations fail with it: port scans see every port as closed, and HTTP, TLS
+  and JARM probes return nothing. No traffic goes out directly. Results from a
+  run that lost its proxy are incomplete, so the proxy must be monitored
+  externally and affected enumerations stopped and rerun (see below).
 
 ## Configuration
 
@@ -38,7 +43,7 @@ need. A bare `host:port` is rejected — include the scheme.
 ### How the three cases behave
 
 - **`-active` with `-active-proxy`** → all active traffic goes through the
-  proxy, whatever `-active-strict` says. A proxy failure ends the run.
+  proxy, whatever `-active-strict` says.
 - **`-active`, no proxy, strict (the default)** → refused. The engine will not
   start the run rather than send active traffic over the default network. You
   must pass a proxy or opt out.
@@ -84,20 +89,23 @@ Engine REST API (`POST /api/v1/sessions`): include `"active": true` and
 | RDAP, WHOIS, GLEIF, BGP.Tools | No — default network |
 | Forward and reverse DNS | No — default network |
 
-## When the run stops
+## When the proxy fails
 
-A proxy failure is logged as `ERROR` in the engine log
-(`logs/amass/engine/<date>-amass-engine.log`) and, through the log stream, on
-the enum console:
+At start-up, a dead proxy is reported and the session is not created:
 
-```
-active proxy failure; stopping the enumeration  operation=... target=... active_proxy=... error=...
-```
+- The engine log records `failed to create session` with
+  `error="active proxy <url> is not usable: ..."`.
+- `POST /api/v1/sessions` returns HTTP 500, `"error": "failed to create
+  session"`, with the reason in `"details"`.
+- `oam_enum` prints `Failed to create a session with the Amass engine:
+  createSession: status=500 ... error=failed to create session: active proxy
+  <url> is not usable: ...` and exits non-zero.
 
-`oam_enum` then exits non-zero (even under `-silent`), so a queue runner such as
-`enum-companies.py` stops rather than moving on. Causes include: the proxy host
-unreachable, bad credentials, the proxy refusing to relay (ruleset, TTL), and a
-dead proxy at start-up (the engine checks reachability before dispatching work).
+Mid-run, nothing is reported by the engine. Detecting the failure is the job
+of an external monitor, which should stop the affected engines and prevent new
+enumerations until the proxy is restored (the start-up check also refuses
+them). A run that lost its proxy has recorded ports as closed and marked its
+probes as done, so rerun it once the relevant TTLs have expired.
 
 ## Network setup
 

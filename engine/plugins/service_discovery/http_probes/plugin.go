@@ -125,10 +125,6 @@ func (hp *httpProbing) query(e *et.Event, entity *dbt.Entity, target string, por
 	resp, err := amasshttp.RequestWebPage(ctx, client, &amasshttp.Request{URL: target})
 	e.Session.NetSem().Release()
 
-	// A proxy-side failure stops the whole run.
-	if support.CheckActiveHTTPError(e.Session, target, err) {
-		return findings
-	}
 	if err == nil && resp != nil {
 		findings = append(findings, hp.store(e, resp, entity, port)...)
 	}

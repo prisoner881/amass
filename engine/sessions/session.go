@@ -232,23 +232,6 @@ func (s *Session) Done() bool {
 	return s.finished
 }
 
-// FailActive records a fatal error and kills the session. The first caller
-// wins, so a storm of proxy failures records one reason. The failure is
-// surfaced in SessionStats, which the enum CLI polls to abort the run.
-func (s *Session) FailActive(reason string) {
-	s.stats.Lock()
-	if s.stats.Failed {
-		s.stats.Unlock()
-		return
-	}
-	s.stats.Failed = true
-	s.stats.FailReason = reason
-	s.stats.Unlock()
-
-	s.log.Error("session failed; stopping", "reason", reason)
-	s.Kill()
-}
-
 func (s *Session) Kill() {
 	select {
 	case <-s.done:

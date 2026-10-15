@@ -74,8 +74,7 @@ func allRecogDBs() []string {
 // selectDialer returns the dialer this plugin's active-only traffic (banner
 // peeks, raw TLS cert handshakes) must use: the active proxy when configured,
 // a direct dialer only when the operator opted out of strict mode, and an
-// error when active+strict has no proxy. support.ActiveDialer also fails the
-// session on any proxy-side failure.
+// error when active+strict has no proxy.
 func selectDialer(e *et.Event) (amassnet.DialContext, error) {
 	return support.ActiveDialer(e.Session, PeekTimeout)
 }

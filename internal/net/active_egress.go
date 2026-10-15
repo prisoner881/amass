@@ -46,9 +46,9 @@ var ErrNoActiveEgress = errors.New("active egress is not configured: refusing to
 // ProxyError marks a failure that is the active proxy's fault — the proxy
 // could not be reached, rejected our credentials, or refused to relay — as
 // opposed to the target's own answer (connection refused, host unreachable)
-// relayed back through a working proxy. A proxy failure ends the enumeration;
-// a relayed target answer is an ordinary scan result. IsProxyError reports
-// whether an error chain contains one.
+// relayed back through a working proxy. HealthCheck uses the distinction to
+// refuse a session only when the proxy itself is unusable. IsProxyError
+// reports whether an error chain contains one.
 type ProxyError struct{ err error }
 
 func (e *ProxyError) Error() string { return e.err.Error() }
@@ -103,10 +103,7 @@ func (a *ActiveEgress) CloseIdleConnections() {
 }
 
 // HealthCheck opens and immediately closes a tunnelled connection to probe,
-// confirming the proxy is reachable and willing to relay. It returns a
-// *ProxyError when the proxy itself is the problem. The engine calls this
-// once before dispatching any work, so a dead proxy fails the session at
-// startup rather than silently later.
+// confirming the proxy is reachable and willing to relay.
 // It returns a *ProxyError only when the proxy itself is the problem
 // (unreachable, bad auth, refuses to relay). A connection that the proxy
 // relays — whether it succeeds, or the probe host refuses it — means the
@@ -239,11 +236,11 @@ func buildProxyDialContext(u *url.URL, perDialTimeout time.Duration) (DialContex
 // reply status with no nested dial error. So:
 //
 //   - a nested "dial" OpError, or a SOCKS reply about the proxy's own state
-//     (general failure, not allowed, TTL expired) → proxy failure, which
-//     ends the run;
-//   - a relayed "connection refused" / "unreachable" from the target → an
-//     ordinary scan result, passed through unwrapped so the port scanner
-//     records it as a closed/unreachable port.
+//     (general failure, not allowed by ruleset, command or address type not
+//     supported) → proxy failure, wrapped in a *ProxyError;
+//   - a relayed "connection refused" / "unreachable" / "TTL expired" from the
+//     target → an ordinary scan result, passed through unwrapped so the port
+//     scanner records it as a closed/unreachable/filtered port.
 func classifySOCKSDialError(proxyHost, addr string, err error) error {
 	// Could not reach the proxy at all: the chain contains a dial OpError.
 	for e := err; e != nil; e = errors.Unwrap(e) {
