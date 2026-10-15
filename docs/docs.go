@@ -71,7 +71,7 @@ const docTemplate = `{
         },
         "/sessions": {
             "post": {
-                "description": "Creates a new Amass engine session using the provided configuration JSON.",
+                "description": "Creates a new Amass engine session using the provided configuration JSON. The session does no work until seed assets are posted to /sessions/{session_token}/assets, and its handlers run only for the transformations in the configuration. With active set to true, the request is refused with 400 when no active_proxy is configured and active_strict is not false, and with 500 when the active_proxy cannot be reached or will not relay; the reason is in details.",
                 "consumes": [
                     "application/json"
                 ],
@@ -101,13 +101,13 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Invalid JSON or invalid configuration",
+                        "description": "Invalid JSON, or invalid configuration (including the active-egress policy)",
                         "schema": {
                             "$ref": "#/definitions/v1.ErrorResponse"
                         }
                     },
                     "500": {
-                        "description": "Failed to create session",
+                        "description": "Failed to create session (including an unusable active_proxy)",
                         "schema": {
                             "$ref": "#/definitions/v1.ErrorResponse"
                         }
@@ -143,7 +143,7 @@ const docTemplate = `{
         },
         "/sessions/{session_token}": {
             "delete": {
-                "description": "Cancels an active session. Returns no content on success.",
+                "description": "Stops the session immediately and returns 204. The token is invalid from that point. Cleanup (backlog, temporary directory, database connection) finishes in the background about 10 seconds later.",
                 "tags": [
                     "sessions"
                 ],
@@ -199,7 +199,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
-                        "description": "Asset type (e.g., autonomous_system, fqdn, ipaddress, netblock, location, organization)",
+                        "description": "Asset type: the Open Asset Model type name in lowercase with no separators (e.g., fqdn, ipaddress, netblock, autonomoussystem, organization)",
                         "name": "asset_type",
                         "in": "path",
                         "required": true
@@ -269,7 +269,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
-                        "description": "Asset type (e.g., autonomous_system, fqdn, ipaddress, netblock, location, organization)",
+                        "description": "Asset type: the Open Asset Model type name in lowercase with no separators (e.g., fqdn, ipaddress, netblock, autonomoussystem, organization)",
                         "name": "asset_type",
                         "in": "path",
                         "required": true
@@ -359,6 +359,80 @@ const docTemplate = `{
                 }
             }
         },
+        "/sessions/{session_token}/end-work": {
+            "get": {
+                "description": "Reports the progress of the work started by POST /sessions/{session_token}/end-work. done becomes true when that work has finished, and stays false if it was never started. phase is one of none, owned-fill, idle-wait, listing, requeue, drain or done. candidates and requeued are the sweep's counts; waiting, leased and processed are the IPAddress backlog counts.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sessions"
+                ],
+                "summary": "Get session-end work progress",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Session token (UUID)",
+                        "name": "session_token",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/support.EndWorkProgress"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid session token",
+                        "schema": {
+                            "$ref": "#/definitions/v1.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Session not found",
+                        "schema": {
+                            "$ref": "#/definitions/v1.ErrorResponse"
+                        }
+                    }
+                }
+            },
+            "post": {
+                "description": "Starts the session-end work in the background: the owned-netblock fill, then the Protocol-Probes sweep of IPs that were missed. Both run only when the session has active set to true; otherwise the work finishes at once. Only the first request for a session starts the work; later requests return 202 and do nothing. The session keeps running, so stats and end-work progress stay available. Poll GET /sessions/{session_token}/end-work until done is true.",
+                "tags": [
+                    "sessions"
+                ],
+                "summary": "Start session-end work",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Session token (UUID)",
+                        "name": "session_token",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "202": {
+                        "description": "Accepted; the work runs in the background"
+                    },
+                    "400": {
+                        "description": "Invalid session token",
+                        "schema": {
+                            "$ref": "#/definitions/v1.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Session not found",
+                        "schema": {
+                            "$ref": "#/definitions/v1.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/sessions/{session_token}/scope/{asset_type}": {
             "get": {
                 "description": "Returns the scoped assets for the given session and asset type as an array of raw OAM JSON objects.",
@@ -379,7 +453,7 @@ const docTemplate = `{
                     },
                     {
                         "type": "string",
-                        "description": "Asset type (e.g., autonomoussystem, fqdn, ipaddress, netblock, location, organization)",
+                        "description": "Asset type: autonomoussystem, fqdn, ipaddress, netblock, location or organization",
                         "name": "asset_type",
                         "in": "path",
                         "required": true
@@ -409,7 +483,7 @@ const docTemplate = `{
         },
         "/sessions/{session_token}/stats": {
             "get": {
-                "description": "Returns the current runtime statistics for a session.",
+                "description": "Returns the session's work-item counts, recalculated every 2 seconds from the backlog across all asset types: workItemsCompleted is the number processed, workItemsTotal is processed plus waiting plus leased. The session is idle when the two are equal.",
                 "produces": [
                     "application/json"
                 ],
@@ -450,7 +524,7 @@ const docTemplate = `{
         },
         "/sessions/{session_token}/ws/logs": {
             "get": {
-                "description": "Upgrades the HTTP connection to a WebSocket and streams session log lines as UTF-8 text frames.\nThe server sends periodic ping frames (~30s) and expects pong responses; idle connections may be closed.",
+                "description": "Upgrades the HTTP connection to a WebSocket and streams the session's log records as UTF-8 text frames, one JSON object per frame. Only records written while at least one client is connected are delivered; nothing is buffered for later. The server sends a ping every 30 seconds and never reads client messages, so a client must keep reading the connection (which answers the pings). Keep one connection open for the life of the session.",
                 "tags": [
                     "sessions"
                 ],
@@ -525,7 +599,7 @@ const docTemplate = `{
                     "type": "string"
                 },
                 "options": {
-                    "description": "Options holds source-specific integer settings, such as a credit\nbudget, read by the source's plugin through IntOption.",
+                    "description": "Options holds source-specific integer settings, such as a credit\nbudget, read by the source's plugin through IntOption. Prospeo reads\nmax_emails_per_domain and min_remaining_credits.",
                     "type": "object",
                     "additionalProperties": {
                         "type": "integer"
@@ -612,10 +686,10 @@ const docTemplate = `{
                     }
                 },
                 "cidrs": {
-                    "description": "CIDR IPNET",
+                    "description": "CIDRs in scope. In JSON each is Go's net.IPNet encoding, an object\nsuch as {\"IP\": \"198.51.100.0\", \"Mask\": \"////AA==\"}, where Mask is the\nbase64 of the mask bytes; a plain \"198.51.100.0/24\" string is rejected",
                     "type": "array",
                     "items": {
-                        "$ref": "#/definitions/net.IPNet"
+                        "type": "object"
                     }
                 },
                 "domains": {
@@ -626,18 +700,14 @@ const docTemplate = `{
                     }
                 },
                 "ips": {
-                    "description": "IP Net.IP",
+                    "description": "IP addresses in scope, as strings such as \"192.0.2.10\" or \"2001:db8::1\"",
                     "type": "array",
                     "items": {
-                        "type": "array",
-                        "items": {
-                            "type": "integer",
-                            "format": "int32"
-                        }
+                        "type": "string"
                     }
                 },
                 "ports": {
-                    "description": "The ports checked for certificates",
+                    "description": "The ports scanned and probed in active mode, as a list of integers",
                     "type": "array",
                     "items": {
                         "type": "integer"
@@ -673,7 +743,7 @@ const docTemplate = `{
                     "type": "boolean"
                 },
                 "active_proxy": {
-                    "description": "ActiveProxy is the runtime proxy URL through which all -active traffic\n(HTTP probes and raw TLS/JARM dials) must egress. Passive traffic (data\nsources, general/crawl clients) and all DNS are unaffected and continue\nto use the default networking path. Supported schemes: http, https,\nsocks5, socks5h.",
+                    "description": "ActiveProxy is the runtime proxy URL through which all -active traffic\n(port scans, HTTP/HTTPS probes, banner and TLS certificate probes, and\nJARM) must egress. Passive traffic (data sources, registry lookups) and\nall DNS are unaffected and continue to use the default networking path.\nSupported schemes: http, https, socks5, socks5h.",
                     "type": "string"
                 },
                 "active_strict": {
@@ -758,24 +828,29 @@ const docTemplate = `{
                 }
             }
         },
-        "net.IPNet": {
+        "support.EndWorkProgress": {
             "type": "object",
             "properties": {
-                "ip": {
-                    "description": "network number",
-                    "type": "array",
-                    "items": {
-                        "type": "integer",
-                        "format": "int32"
-                    }
+                "candidates": {
+                    "type": "integer"
                 },
-                "mask": {
-                    "description": "network mask",
-                    "type": "array",
-                    "items": {
-                        "type": "integer",
-                        "format": "int32"
-                    }
+                "done": {
+                    "type": "boolean"
+                },
+                "leased": {
+                    "type": "integer"
+                },
+                "phase": {
+                    "type": "string"
+                },
+                "processed": {
+                    "type": "integer"
+                },
+                "requeued": {
+                    "type": "integer"
+                },
+                "waiting": {
+                    "type": "integer"
                 }
             }
         },

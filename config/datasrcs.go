@@ -18,7 +18,8 @@ type DataSource struct {
 	TTL   int                     `yaml:"ttl,omitempty" json:"ttl,omitempty"`
 	Creds map[string]*Credentials `yaml:"creds,omitempty" json:"creds,omitempty"`
 	// Options holds source-specific integer settings, such as a credit
-	// budget, read by the source's plugin through IntOption.
+	// budget, read by the source's plugin through IntOption. Prospeo reads
+	// max_emails_per_domain and min_remaining_credits.
 	Options map[string]int `yaml:"options,omitempty" json:"options,omitempty"`
 }
 

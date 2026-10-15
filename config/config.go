@@ -112,10 +112,10 @@ type Config struct {
 	Active bool `yaml:"active,omitempty" json:"active,omitempty"`
 
 	// ActiveProxy is the runtime proxy URL through which all -active traffic
-	// (HTTP probes and raw TLS/JARM dials) must egress. Passive traffic (data
-	// sources, general/crawl clients) and all DNS are unaffected and continue
-	// to use the default networking path. Supported schemes: http, https,
-	// socks5, socks5h.
+	// (port scans, HTTP/HTTPS probes, banner and TLS certificate probes, and
+	// JARM) must egress. Passive traffic (data sources, registry lookups) and
+	// all DNS are unaffected and continue to use the default networking path.
+	// Supported schemes: http, https, socks5, socks5h.
 	ActiveProxy string `yaml:"active_proxy,omitempty" json:"active_proxy,omitempty"`
 
 	// ActiveStrict, when true (the default), makes the engine refuse to start
@@ -182,8 +182,8 @@ type Scope struct {
 	// The root domain names that the enumeration will target
 	Domains []string `yaml:"domains,omitempty" json:"domains,omitempty"`
 
-	// IP Net.IP
-	Addresses []net.IP `yaml:"-" json:"ips,omitempty"`
+	// IP addresses in scope, as strings such as "192.0.2.10" or "2001:db8::1"
+	Addresses []net.IP `yaml:"-" json:"ips,omitempty" swaggertype:"array,string"`
 
 	// The IP addresses specified as in scope
 	IP []string `yaml:"ips,omitempty" json:"-"`
@@ -191,8 +191,10 @@ type Scope struct {
 	// ASNs specified as in scope
 	ASNs []int `yaml:"asns,omitempty" json:"asns,omitempty"`
 
-	// CIDR IPNET
-	CIDRs []*net.IPNet `yaml:"-" json:"cidrs,omitempty"`
+	// CIDRs in scope. In JSON each is Go's net.IPNet encoding, an object
+	// such as {"IP": "198.51.100.0", "Mask": "////AA=="}, where Mask is the
+	// base64 of the mask bytes; a plain "198.51.100.0/24" string is rejected
+	CIDRs []*net.IPNet `yaml:"-" json:"cidrs,omitempty" swaggertype:"array,object"`
 
 	// CIDR in scope
 	CIDRStrings []string `yaml:"cidrs,omitempty" json:"-"`
@@ -200,7 +202,7 @@ type Scope struct {
 	// Ports as an interface to parse and  for ranges, it is stored as an interface for easy casting
 	PortsRaw []interface{} `yaml:"ports,omitempty" json:"-"`
 
-	// The ports checked for certificates
+	// The ports scanned and probed in active mode, as a list of integers
 	Ports []int `yaml:"-" json:"ports,omitempty"`
 
 	// A blacklist of subdomain names that will not be investigated

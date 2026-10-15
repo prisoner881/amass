@@ -23,8 +23,7 @@ var upgrader = websocket.Upgrader{
 // WSLogsHandler godoc
 //
 // @Summary      Stream session logs (WebSocket)
-// @Description  Upgrades the HTTP connection to a WebSocket and streams session log lines as UTF-8 text frames.
-// @Description  The server sends periodic ping frames (~30s) and expects pong responses; idle connections may be closed.
+// @Description  Upgrades the HTTP connection to a WebSocket and streams the session's log records as UTF-8 text frames, one JSON object per frame. Only records written while at least one client is connected are delivered; nothing is buffered for later. The server sends a ping every 30 seconds and never reads client messages, so a client must keep reading the connection (which answers the pings). Keep one connection open for the life of the session.
 // @Tags         sessions
 // @Param        session_token  path  string  true  "Session token (UUID)"
 // @Success      101  "Switching Protocols (WebSocket upgrade)"

@@ -104,14 +104,14 @@ func (v *V1Handlers) HealthCheck(w http.ResponseWriter, r *http.Request) {
 // CreateSessionHandler godoc
 //
 // @Summary      Create a new engine session
-// @Description  Creates a new Amass engine session using the provided configuration JSON.
+// @Description  Creates a new Amass engine session using the provided configuration JSON. The session does no work until seed assets are posted to /sessions/{session_token}/assets, and its handlers run only for the transformations in the configuration. With active set to true, the request is refused with 400 when no active_proxy is configured and active_strict is not false, and with 500 when the active_proxy cannot be reached or will not relay; the reason is in details.
 // @Tags         sessions
 // @Accept       json
 // @Produce      json
 // @Param        config  body      config.Config  true  "Engine configuration"
 // @Success      201     {object}  CreateSessionResponse
-// @Failure      400     {object}  ErrorResponse  "Invalid JSON or invalid configuration"
-// @Failure      500     {object}  ErrorResponse  "Failed to create session"
+// @Failure      400     {object}  ErrorResponse  "Invalid JSON, or invalid configuration (including the active-egress policy)"
+// @Failure      500     {object}  ErrorResponse  "Failed to create session (including an unusable active_proxy)"
 // @Router       /sessions [post]
 func (v *V1Handlers) CreateSessionHandler(w http.ResponseWriter, r *http.Request) {
 	raw, err := readRawJSON(r)
@@ -188,7 +188,7 @@ func (v *V1Handlers) ListSessionsHandler(w http.ResponseWriter, r *http.Request)
 // TerminateSessionHandler godoc
 //
 // @Summary      Terminate a session
-// @Description  Cancels an active session. Returns no content on success.
+// @Description  Stops the session immediately and returns 204. The token is invalid from that point. Cleanup (backlog, temporary directory, database connection) finishes in the background about 10 seconds later.
 // @Tags         sessions
 // @Param        session_token  path  string  true  "Session token (UUID)"
 // @Success      204
@@ -217,8 +217,16 @@ func (v *V1Handlers) TerminateSessionHandler(w http.ResponseWriter, r *http.Requ
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// EndWorkHandler starts session-end work (owned-netblock fill +
-// Protocol-Probes sweep) without killing the session. Returns 202.
+// EndWorkHandler godoc
+//
+// @Summary      Start session-end work
+// @Description  Starts the session-end work in the background: the owned-netblock fill, then the Protocol-Probes sweep of IPs that were missed. Both run only when the session has active set to true; otherwise the work finishes at once. Only the first request for a session starts the work; later requests return 202 and do nothing. The session keeps running, so stats and end-work progress stay available. Poll GET /sessions/{session_token}/end-work until done is true.
+// @Tags         sessions
+// @Param        session_token  path  string  true  "Session token (UUID)"
+// @Success      202  "Accepted; the work runs in the background"
+// @Failure      400  {object}  ErrorResponse  "Invalid session token"
+// @Failure      404  {object}  ErrorResponse  "Session not found"
+// @Router       /sessions/{session_token}/end-work [post]
 func (v *V1Handlers) EndWorkHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	token, err := uuid.Parse(vars["session_token"])
@@ -234,6 +242,17 @@ func (v *V1Handlers) EndWorkHandler(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusAccepted)
 }
 
+// EndWorkStatusHandler godoc
+//
+// @Summary      Get session-end work progress
+// @Description  Reports the progress of the work started by POST /sessions/{session_token}/end-work. done becomes true when that work has finished, and stays false if it was never started. phase is one of none, owned-fill, idle-wait, listing, requeue, drain or done. candidates and requeued are the sweep's counts; waiting, leased and processed are the IPAddress backlog counts.
+// @Tags         sessions
+// @Produce      json
+// @Param        session_token  path  string  true  "Session token (UUID)"
+// @Success      200  {object}  support.EndWorkProgress
+// @Failure      400  {object}  ErrorResponse  "Invalid session token"
+// @Failure      404  {object}  ErrorResponse  "Session not found"
+// @Router       /sessions/{session_token}/end-work [get]
 func (v *V1Handlers) EndWorkStatusHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
 	token, err := uuid.Parse(vars["session_token"])
@@ -262,7 +281,7 @@ func (v *V1Handlers) EndWorkStatusHandler(w http.ResponseWriter, r *http.Request
 // GetStatsHandler godoc
 //
 // @Summary      Get session statistics
-// @Description  Returns the current runtime statistics for a session.
+// @Description  Returns the session's work-item counts, recalculated every 2 seconds from the backlog across all asset types: workItemsCompleted is the number processed, workItemsTotal is processed plus waiting plus leased. The session is idle when the two are equal.
 // @Tags         sessions
 // @Produce      json
 // @Param        session_token  path  string  true  "Session token (UUID)"
@@ -301,7 +320,7 @@ func (v *V1Handlers) GetStatsHandler(w http.ResponseWriter, r *http.Request) {
 // @Tags         scope
 // @Produce      json
 // @Param        session_token  path  string  true  "Session token (UUID)"
-// @Param        asset_type     path  string  true  "Asset type (e.g., autonomoussystem, fqdn, ipaddress, netblock, location, organization)"
+// @Param        asset_type     path  string  true  "Asset type: autonomoussystem, fqdn, ipaddress, netblock, location or organization"
 // @Success      200  {object}  ScopeResponse  "Response contains a 'data' array of raw OAM JSON"
 // @Failure      400  {object}  ErrorResponse  "Invalid session token"
 // @Failure      404  {object}  ErrorResponse  "Session not found or scope not found for asset type"
@@ -382,7 +401,7 @@ func (v *V1Handlers) GetScopeHandler(w http.ResponseWriter, r *http.Request) {
 // @Accept       json
 // @Produce      json
 // @Param        session_token  path  string          true  "Session token (UUID)"
-// @Param        asset_type     path  string          true  "Asset type (e.g., autonomous_system, fqdn, ipaddress, netblock, location, organization)"
+// @Param        asset_type     path  string          true  "Asset type: the Open Asset Model type name in lowercase with no separators (e.g., fqdn, ipaddress, netblock, autonomoussystem, organization)"
 // @Param        asset          body  json.RawMessage true  "Raw OAM JSON object (without 'type')"
 // @Success      200            {object}  AddAssetResponse
 // @Failure      400            {object}  ErrorResponse  "Invalid session token, invalid JSON, or invalid asset object"
@@ -444,7 +463,7 @@ func (v *V1Handlers) AddAssetTypedHandler(w http.ResponseWriter, r *http.Request
 // @Accept       json
 // @Produce      json
 // @Param        session_token  path  string               true  "Session token (UUID)"
-// @Param        asset_type     path  string               true  "Asset type (e.g., autonomous_system, fqdn, ipaddress, netblock, location, organization)"
+// @Param        asset_type     path  string               true  "Asset type: the Open Asset Model type name in lowercase with no separators (e.g., fqdn, ipaddress, netblock, autonomoussystem, organization)"
 // @Param        request        body  BulkAddAssetsRequest true  "Bulk add request payload"
 // @Success      200            {object}  BulkAddAssetsResponse
 // @Failure      400            {object}  ErrorResponse  "Invalid session token, invalid JSON, empty items, or no valid items"
