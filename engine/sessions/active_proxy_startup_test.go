@@ -41,3 +41,11 @@ func TestCreateSessionRefusesStrictWithoutProxy(t *testing.T) {
 		t.Fatalf("want a refusal for active+strict without a proxy, got %v", err)
 	}
 }
+
+// Session creation, the scope and the plugins read cfg.Scope unchecked, so a
+// configuration without one must be refused rather than panic.
+func TestCreateSessionRefusesMissingScope(t *testing.T) {
+	if _, err := CreateSession(nil, nil, &config.Config{}); err == nil || !strings.Contains(err.Error(), "no scope") {
+		t.Fatalf("want a refusal for a configuration without a scope, got %v", err)
+	}
+}

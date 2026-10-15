@@ -104,13 +104,13 @@ func (v *V1Handlers) HealthCheck(w http.ResponseWriter, r *http.Request) {
 // CreateSessionHandler godoc
 //
 // @Summary      Create a new engine session
-// @Description  Creates a new Amass engine session using the provided configuration JSON. The session does no work until seed assets are posted to /sessions/{session_token}/assets, and its handlers run only for the transformations in the configuration. With active set to true, the request is refused with 400 when no active_proxy is configured and active_strict is not false, and with 500 when the active_proxy cannot be reached or will not relay; the reason is in details.
+// @Description  Creates a new Amass engine session using the provided configuration JSON. The configuration must include scope. The session does no work until seed assets are posted to /sessions/{session_token}/assets, and its handlers run only for the transformations in the configuration. With active set to true, the request is refused with 400 when no active_proxy is configured and active_strict is not false, and with 500 when the active_proxy cannot be reached or will not relay; the reason is in details.
 // @Tags         sessions
 // @Accept       json
 // @Produce      json
 // @Param        config  body      config.Config  true  "Engine configuration"
 // @Success      201     {object}  CreateSessionResponse
-// @Failure      400     {object}  ErrorResponse  "Invalid JSON, or invalid configuration (including the active-egress policy)"
+// @Failure      400     {object}  ErrorResponse  "Invalid JSON, or invalid configuration (including a missing scope and the active-egress policy)"
 // @Failure      500     {object}  ErrorResponse  "Failed to create session (including an unusable active_proxy)"
 // @Router       /sessions [post]
 func (v *V1Handlers) CreateSessionHandler(w http.ResponseWriter, r *http.Request) {
@@ -128,6 +128,12 @@ func (v *V1Handlers) CreateSessionHandler(w http.ResponseWriter, r *http.Request
 	var config config.Config
 	if err := json.Unmarshal(raw, &config); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid configuration", err)
+		return
+	}
+	// Session creation and the scope code read config.Scope unchecked, so a
+	// payload without one used to panic and drop the connection.
+	if config.Scope == nil {
+		writeError(w, http.StatusBadRequest, "invalid configuration", errors.New("scope is required"))
 		return
 	}
 	// Populate FROM/TO in transformations
@@ -404,9 +410,9 @@ func (v *V1Handlers) GetScopeHandler(w http.ResponseWriter, r *http.Request) {
 // @Param        asset_type     path  string          true  "Asset type: the Open Asset Model type name in lowercase with no separators (e.g., fqdn, ipaddress, netblock, autonomoussystem, organization)"
 // @Param        asset          body  json.RawMessage true  "Raw OAM JSON object (without 'type')"
 // @Success      200            {object}  AddAssetResponse
-// @Failure      400            {object}  ErrorResponse  "Invalid session token, invalid JSON, or invalid asset object"
+// @Failure      400            {object}  ErrorResponse  "Invalid session token, invalid JSON, or invalid asset object (unknown type, or no identifying value such as an FQDN without a name)"
 // @Failure      404            {object}  ErrorResponse  "Session not found"
-// @Failure      500            {object}  ErrorResponse  "Failed to submit the asset"
+// @Failure      500            {object}  ErrorResponse  "Failed to submit the asset; the database's reason is in details"
 // @Router       /sessions/{session_token}/assets/{asset_type} [post]
 func (v *V1Handlers) AddAssetTypedHandler(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
@@ -458,7 +464,7 @@ func (v *V1Handlers) AddAssetTypedHandler(w http.ResponseWriter, r *http.Request
 // AddAssetsBulkHandler godoc
 //
 // @Summary      Add assets in bulk (typed by path)
-// @Description  Submits multiple OAM assets to the session in one request. The asset type is provided in the URL path. Each item in 'items' is a raw OAM JSON object without a 'type' field.
+// @Description  Submits multiple OAM assets to the session in one request. The asset type is provided in the URL path. Each item in 'items' is a raw OAM JSON object without a 'type' field. Items that do not parse, or have no identifying value, are skipped and not counted; items the database refuses are counted in failed.
 // @Tags         assets
 // @Accept       json
 // @Produce      json

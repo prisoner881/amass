@@ -69,6 +69,10 @@ func CreateSession(mgr *manager, reg et.Registry, cfg *config.Config) (et.Sessio
 	if cfg == nil {
 		cfg = config.NewConfig()
 	}
+	// The session, its scope and the plugins all read cfg.Scope unchecked.
+	if cfg.Scope == nil {
+		return nil, errors.New("the configuration has no scope")
+	}
 
 	clients, err := NewClients(len(cfg.Scope.Ports), cfg.ActiveProxy)
 	if err != nil {
