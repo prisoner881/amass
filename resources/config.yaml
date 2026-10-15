@@ -32,7 +32,8 @@ options:
   # active traffic cannot leave the default network by accident. Set false to
   # allow active traffic over the default egress (testing, or a target that
   # does not need the proxy). When an active_proxy IS set, all active traffic
-  # goes through it regardless of this flag, and a proxy failure ends the run.
+  # goes through it regardless of this flag. The proxy is checked when the
+  # session starts; a run is refused if it is down.
   # active_strict: true
   bruteforce:
     enabled: false

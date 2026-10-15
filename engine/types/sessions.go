@@ -67,9 +67,6 @@ type Session interface {
 	TmpDir() string
 	Stats() *SessionStats
 	Done() bool
-	// FailActive records a fatal error (typically an active-proxy failure)
-	// and kills the session so the whole enumeration stops at once.
-	FailActive(reason string)
 	Kill()
 }
 
@@ -162,11 +159,6 @@ type SessionStats struct {
 	sync.RWMutex
 	WorkItemsCompleted int `json:"workItemsCompleted"`
 	WorkItemsTotal     int `json:"workItemsTotal"`
-	// Failed is set when the session was stopped by a fatal error (e.g. an
-	// active-proxy failure). FailReason carries the message. The enum CLI
-	// polls these and aborts the run with a non-zero exit.
-	Failed     bool   `json:"failed,omitempty"`
-	FailReason string `json:"failReason,omitempty"`
 }
 
 type SessionManager interface {

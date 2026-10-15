@@ -72,6 +72,12 @@ type V1Handlers struct {
 	mgr et.SessionManager
 }
 
+func (v *V1Handlers) logError(msg string, err error) {
+	if v.log != nil {
+		v.log.Error(msg, "error", err.Error())
+	}
+}
+
 func NewV1Handlers(ctx context.Context, dis et.Dispatcher, mgr et.SessionManager, log *slog.Logger) (*V1Handlers, error) {
 	return &V1Handlers{
 		ctx: ctx,
@@ -135,12 +141,17 @@ func (v *V1Handlers) CreateSessionHandler(w http.ResponseWriter, r *http.Request
 	// Only the egress policy: CheckSettings would also rewrite the wordlists
 	// and add checks the engine never applied to API sessions before.
 	if err := config.CheckActiveEgress(); err != nil {
+		v.logError("session refused: invalid configuration", err)
 		writeError(w, http.StatusBadRequest, "invalid configuration", err)
 		return
 	}
 
+	// A dead active proxy is refused here (CreateSession's start-up check),
+	// so this is the one place that failure is reported: log it, and return
+	// the reason in the response's details.
 	sess, err := v.mgr.NewSession(&config)
 	if err != nil {
+		v.logError("failed to create session", err)
 		writeError(w, http.StatusInternalServerError, "failed to create session", err)
 		return
 	}

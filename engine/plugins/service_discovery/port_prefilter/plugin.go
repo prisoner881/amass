@@ -103,9 +103,8 @@ func (pp *portPrefilter) check(e *et.Event) error {
 	}
 
 	// The connect scan touches the target's ports, so it is active traffic:
-	// support.ActiveDialer routes it through the proxy when one is set, and
-	// a proxy failure fails the whole session. Never scan over the default
-	// network when active+strict has no proxy.
+	// support.ActiveDialer routes it through the proxy when one is set.
+	// Never scan over the default network when active+strict has no proxy.
 	dial, err := support.ActiveDialer(e.Session, support.PortPrefilterScanTimeout)
 	if err != nil {
 		e.Session.Log().Error("skipping port prefilter: no active egress",

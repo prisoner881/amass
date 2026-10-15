@@ -24,12 +24,9 @@ import (
 // activeTestSession is a minimal et.Session for the active-egress helpers.
 type activeTestSession struct {
 	et.Session
-	cfg      *config.Config
-	egress   *amassnet.ActiveEgress
-	clients  *et.SessionHTTPClients
-	failed   bool
-	failWhy  string
-	failOnce sync.Once
+	cfg     *config.Config
+	egress  *amassnet.ActiveEgress
+	clients *et.SessionHTTPClients
 }
 
 func (s *activeTestSession) Ctx() context.Context                 { return context.Background() }
@@ -37,9 +34,6 @@ func (s *activeTestSession) Log() *slog.Logger                    { return slog.
 func (s *activeTestSession) Config() *config.Config               { return s.cfg }
 func (s *activeTestSession) Clients() *et.SessionHTTPClients      { return s.clients }
 func (s *activeTestSession) ActiveEgress() *amassnet.ActiveEgress { return s.egress }
-func (s *activeTestSession) FailActive(reason string) {
-	s.failOnce.Do(func() { s.failed, s.failWhy = true, reason })
-}
 
 func newActiveSession(strict bool, egress *amassnet.ActiveEgress) *activeTestSession {
 	cfg := config.NewConfig()
@@ -173,13 +167,16 @@ func TestActiveDialerRoutesThroughProxy(t *testing.T) {
 	if seen := proxy.seen(); len(seen) != 1 || seen[0] != backend.Addr().String() {
 		t.Errorf("proxy saw %v, want the target reached through it", seen)
 	}
-	if sess.failed {
-		t.Errorf("session failed unexpectedly: %s", sess.failWhy)
-	}
 }
 
-// A proxy failure during an active dial fails the whole session.
-func TestActiveDialerFailsSessionOnProxyError(t *testing.T) {
+// A dead proxy makes active traffic fail; it never falls back to a direct
+// connection. There is no mid-run detection, so this is the whole guarantee:
+// the raw dialer, the port scanner and the HTTP client all fail without the
+// target ever seeing a connection.
+func TestDeadProxyNeverGoesDirect(t *testing.T) {
+	target := newCountingListener(t)
+	addr := "127.0.0.1:" + strconv.Itoa(target.port())
+
 	ae, err := amassnet.NewActiveEgress("socks5://"+deadAddr(t), 2*time.Second)
 	if err != nil {
 		t.Fatal(err)
@@ -190,28 +187,25 @@ func TestActiveDialerFailsSessionOnProxyError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ActiveDialer: %v", err)
 	}
-	if _, derr := dial(context.Background(), "tcp", "192.0.2.10:443"); derr == nil {
-		t.Fatal("expected the dial to fail against a dead proxy")
+	if _, derr := dial(context.Background(), "tcp", addr); derr == nil {
+		t.Error("expected the dial to fail against a dead proxy")
 	}
-	if !sess.failed {
-		t.Fatal("a proxy failure did not fail the session")
+	if got := scanPorts(context.Background(), dial, "127.0.0.1", []int{target.port()}, nil); len(got) != 0 {
+		t.Errorf("a scan through a dead proxy reported open ports %v", got)
 	}
-}
 
-// A target refused THROUGH a working proxy is an ordinary scan result, not a
-// session failure.
-func TestActiveDialerTargetRefusalIsNotProxyFailure(t *testing.T) {
-	proxy := startTinySOCKS5(t, 0)
-	ae, _ := amassnet.NewActiveEgress("socks5://"+proxy.addr(), 2*time.Second)
-	sess := newActiveSession(true, ae)
-
-	dial, _ := ActiveDialer(sess, 2*time.Second)
-	// Point at a closed local port; the proxy relays the refusal.
-	if _, err := dial(context.Background(), "tcp", deadAddr(t)); err == nil {
-		t.Fatal("expected a refusal")
+	client, err := ActiveHTTPClient(sess)
+	if err != nil {
+		t.Fatalf("ActiveHTTPClient: %v", err)
 	}
-	if sess.failed {
-		t.Errorf("a relayed target refusal must not fail the session: %s", sess.failWhy)
+	if resp, herr := client.Get("http://" + addr + "/"); herr == nil {
+		resp.Body.Close()
+		t.Error("expected the HTTP request to fail against a dead proxy")
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	if n := target.count(); n != 0 {
+		t.Errorf("the target saw %d direct connections with the proxy down", n)
 	}
 }
 
@@ -242,31 +236,6 @@ func TestActiveHTTPClientSelection(t *testing.T) {
 	relaxed := newActiveSession(false, nil)
 	if c, err := ActiveHTTPClient(relaxed); err != nil || c != relaxed.clients.Probe {
 		t.Errorf("non-strict + no proxy: got (%v, %v), want the Probe client", c, err)
-	}
-}
-
-func TestCheckActiveHTTPError(t *testing.T) {
-	sess := newActiveSession(true, nil)
-	// A plain error is not a proxy failure.
-	if CheckActiveHTTPError(sess, "t", context.DeadlineExceeded) {
-		t.Error("deadline exceeded wrongly treated as a proxy failure")
-	}
-	if sess.failed {
-		t.Error("session failed on a non-proxy error")
-	}
-
-	// Produce a genuine proxy error by dialing a dead proxy, then feed it to
-	// the HTTP error check exactly as an active probe would.
-	ae, _ := amassnet.NewActiveEgress("socks5://"+deadAddr(t), time.Second)
-	_, proxyErr := ae.DialContext(context.Background(), "tcp", "192.0.2.10:443")
-	if proxyErr == nil || !amassnet.IsProxyError(proxyErr) {
-		t.Fatalf("expected a proxy error from a dead proxy, got %v", proxyErr)
-	}
-	if !CheckActiveHTTPError(sess, "t", proxyErr) {
-		t.Error("a proxy error was not detected")
-	}
-	if !sess.failed {
-		t.Error("a proxy error did not fail the session")
 	}
 }
 
@@ -355,9 +324,6 @@ func TestScanPortsLeaksNothingAroundTheProxy(t *testing.T) {
 	}
 	if targetSaw != len(open) {
 		t.Errorf("target saw %d connections, want %d (one per open port, all via the proxy)", targetSaw, len(open))
-	}
-	if sess.failed {
-		t.Errorf("session failed during a healthy scan: %s", sess.failWhy)
 	}
 }
 
