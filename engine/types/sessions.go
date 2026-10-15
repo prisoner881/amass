@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/owasp-amass/amass/v5/config"
 	"github.com/owasp-amass/amass/v5/engine/pubsub"
+	amassnet "github.com/owasp-amass/amass/v5/internal/net"
 	"github.com/owasp-amass/asset-db/repository"
 	dbt "github.com/owasp-amass/asset-db/types"
 	oam "github.com/owasp-amass/open-asset-model"
@@ -38,6 +39,10 @@ type SessionHTTPClients struct {
 	General *http.Client
 	Probe   *http.Client
 	Crawl   *http.Client
+	// Active is the HTTP client every -active service probe MUST use. It
+	// egresses through the operator-configured active proxy. Nil when no
+	// active proxy is configured — call sites treat that as fail-closed.
+	Active *http.Client
 }
 
 type Session interface {
@@ -54,10 +59,17 @@ type Session interface {
 	Backlog() Backlog
 	Pipelines() SessionPipelines
 	Clients() *SessionHTTPClients
+	// ActiveEgress returns the egress profile every -active code path (HTTP
+	// probes, raw TLS/JARM dials, port connect scans) MUST use. Nil when no
+	// active_proxy is configured; active operations then fail closed.
+	ActiveEgress() *amassnet.ActiveEgress
 	CIDRanger() cidranger.Ranger
 	TmpDir() string
 	Stats() *SessionStats
 	Done() bool
+	// FailActive records a fatal error (typically an active-proxy failure)
+	// and kills the session so the whole enumeration stops at once.
+	FailActive(reason string)
 	Kill()
 }
 
@@ -150,6 +162,11 @@ type SessionStats struct {
 	sync.RWMutex
 	WorkItemsCompleted int `json:"workItemsCompleted"`
 	WorkItemsTotal     int `json:"workItemsTotal"`
+	// Failed is set when the session was stopped by a fatal error (e.g. an
+	// active-proxy failure). FailReason carries the message. The enum CLI
+	// polls these and aborts the run with a non-zero exit.
+	Failed     bool   `json:"failed,omitempty"`
+	FailReason string `json:"failReason,omitempty"`
 }
 
 type SessionManager interface {

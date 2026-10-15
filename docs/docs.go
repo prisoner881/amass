@@ -23,6 +23,32 @@ const docTemplate = `{
     "host": "{{.Host}}",
     "basePath": "{{.BasePath}}",
     "paths": {
+        "/handler-stats": {
+            "get": {
+                "description": "Queries InfluxDB for the handler_duration measurement written by the engine's pipeline task wrapper, returning average duration and call count per handler over the last 15 minutes, sorted slowest first. Not session-scoped - see the note above GetBacklogHandler for why. Returns 503 if INFLUX_* environment variables are not configured.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "telemetry"
+                ],
+                "summary": "Get per-handler average execution time",
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/v1.HandlerStatsResponse"
+                        }
+                    },
+                    "503": {
+                        "description": "InfluxDB not configured or unreachable",
+                        "schema": {
+                            "$ref": "#/definitions/v1.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/health": {
             "get": {
                 "description": "Returns a simple health indicator that the Amass Engine API is running.",
@@ -292,6 +318,47 @@ const docTemplate = `{
                 }
             }
         },
+        "/sessions/{session_token}/backlog": {
+            "get": {
+                "description": "Returns, for each asset type with any activity, the number of entities waiting, currently leased (in flight), sitting in the pipeline's own internal queue, and already processed - plus session-wide connection semaphore utilization and cumulative port_prefilter statistics. Development/testing tooling: PrefilterScanned/PrefilterOpen use plain, session-independent counters (see support.PrefilterStats), correct for this fork's one-session-per-process deployment model but not intended for use in a multi-session or long-lived-process deployment.",
+                "produces": [
+                    "application/json"
+                ],
+                "tags": [
+                    "sessions"
+                ],
+                "summary": "Get per-asset-type backlog counts for a session",
+                "parameters": [
+                    {
+                        "type": "string",
+                        "description": "Session token (UUID)",
+                        "name": "session_token",
+                        "in": "path",
+                        "required": true
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "OK",
+                        "schema": {
+                            "$ref": "#/definitions/v1.BacklogResponse"
+                        }
+                    },
+                    "400": {
+                        "description": "Invalid session token",
+                        "schema": {
+                            "$ref": "#/definitions/v1.ErrorResponse"
+                        }
+                    },
+                    "404": {
+                        "description": "Session not found",
+                        "schema": {
+                            "$ref": "#/definitions/v1.ErrorResponse"
+                        }
+                    }
+                }
+            }
+        },
         "/sessions/{session_token}/scope/{asset_type}": {
             "get": {
                 "description": "Returns the scoped assets for the given session and asset type as an array of raw OAM JSON objects.",
@@ -457,6 +524,13 @@ const docTemplate = `{
                 "name": {
                     "type": "string"
                 },
+                "options": {
+                    "description": "Options holds source-specific integer settings, such as a credit\nbudget, read by the source's plugin through IntOption.",
+                    "type": "object",
+                    "additionalProperties": {
+                        "type": "integer"
+                    }
+                },
                 "ttl": {
                     "type": "integer"
                 }
@@ -595,7 +669,15 @@ const docTemplate = `{
             "type": "object",
             "properties": {
                 "active": {
-                    "description": "Determines if zone transfers will be attempted",
+                    "description": "Enables active probing of target hosts: port scans, HTTP/HTTPS service\nprobes, banner and TLS certificate probes, and JARM fingerprinting",
+                    "type": "boolean"
+                },
+                "active_proxy": {
+                    "description": "ActiveProxy is the runtime proxy URL through which all -active traffic\n(HTTP probes and raw TLS/JARM dials) must egress. Passive traffic (data\nsources, general/crawl clients) and all DNS are unaffected and continue\nto use the default networking path. Supported schemes: http, https,\nsocks5, socks5h.",
+                    "type": "string"
+                },
+                "active_strict": {
+                    "description": "ActiveStrict, when true (the default), makes the engine refuse to start\nan active run that has no ActiveProxy configured, so active traffic\ncannot egress out of the default network by accident. Set it to false\nto allow active traffic over the default egress (for testing, or for a\ntarget that can be probed without the proxy). When an ActiveProxy IS\nconfigured, all active traffic goes through it regardless of this flag.",
                     "type": "boolean"
                 },
                 "alt_worldlist": {
@@ -705,6 +787,55 @@ const docTemplate = `{
                 }
             }
         },
+        "v1.BacklogBucket": {
+            "type": "object",
+            "properties": {
+                "asset_type": {
+                    "type": "string"
+                },
+                "leased": {
+                    "type": "integer"
+                },
+                "processed": {
+                    "type": "integer"
+                },
+                "queue": {
+                    "type": "integer"
+                },
+                "waiting": {
+                    "type": "integer"
+                }
+            }
+        },
+        "v1.BacklogResponse": {
+            "type": "object",
+            "properties": {
+                "active_connections": {
+                    "type": "integer"
+                },
+                "active_scan_conns": {
+                    "type": "integer"
+                },
+                "buckets": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/v1.BacklogBucket"
+                    }
+                },
+                "max_connections": {
+                    "type": "integer"
+                },
+                "max_scan_conns": {
+                    "type": "integer"
+                },
+                "prefilter_open": {
+                    "type": "integer"
+                },
+                "prefilter_scanned": {
+                    "type": "integer"
+                }
+            }
+        },
         "v1.BulkAddAssetsRequest": {
             "type": "object",
             "properties": {
@@ -753,6 +884,34 @@ const docTemplate = `{
                 },
                 "error": {
                     "type": "string"
+                }
+            }
+        },
+        "v1.HandlerStat": {
+            "type": "object",
+            "properties": {
+                "avg_duration_ns": {
+                    "type": "number"
+                },
+                "call_count": {
+                    "type": "integer"
+                },
+                "handler": {
+                    "type": "string"
+                }
+            }
+        },
+        "v1.HandlerStatsResponse": {
+            "type": "object",
+            "properties": {
+                "handlers": {
+                    "type": "array",
+                    "items": {
+                        "$ref": "#/definitions/v1.HandlerStat"
+                    }
+                },
+                "window_minutes": {
+                    "type": "integer"
                 }
             }
         },

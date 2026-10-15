@@ -128,15 +128,19 @@ func (fe *fqdnEndpoint) query(e *et.Event, host *dbt.Entity) ([]*support.Finding
 	// -shared IP - is fully preserved. A hostname resolving to several,
 	// differently-configured IPs means this can over-include ports
 	// only genuinely open on one of them; a deliberate tradeoff toward
-	// completeness over precision, not an oversight. dial is nil here
-	// deliberately - http_probes has no dialer-selection helper of its
-	// own yet, so this falls back to support.scanPorts' own plain
-	// default, the same as everywhere else in this codebase when no
-	// dialer is explicitly injected; a future active-proxy-egress
-	// integration point, not something needed today. See
-	// support.OpenPortsForFQDN's own doc comment for the full
-	// reasoning this originated from.
-	ports := support.OpenPortsForFQDN(e, host, nil)
+	// completeness over precision, not an oversight.
+	//
+	// These connect scans touch the target's ports, so they are active
+	// traffic and must go through the active egress. Previously this passed
+	// nil, which scanPorts turned into a direct dialer - an active-traffic
+	// leak once a proxy is configured. Fail closed on no usable egress.
+	dial, derr := support.ActiveDialer(e.Session, support.PortPrefilterScanTimeout)
+	if derr != nil {
+		e.Session.Log().Error("skipping FQDN port scan: no active egress",
+			"fqdn", host, "error", derr.Error())
+		return nil, false
+	}
+	ports := support.OpenPortsForFQDN(e, host, dial)
 	if len(ports) == 0 {
 		// Nothing to probe. Reported as "not probed" so the caller
 		// leaves this asset eligible rather than suppressing it for

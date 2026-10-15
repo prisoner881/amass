@@ -63,7 +63,10 @@ type PeekResult struct {
 // yet.
 func PeekBanner(ctx context.Context, dial amassnet.DialContext, addr string, timeout time.Duration) PeekResult {
 	if dial == nil {
-		dial = amassnet.NewDialContext(timeout)
+		// Fail closed: the caller must supply a dialer (support.ActiveDialer).
+		// Never substitute a direct dial, which would leak active traffic
+		// when a proxy is configured.
+		return PeekResult{Err: amassnet.ErrNoActiveEgress}
 	}
 
 	conn, err := dial(ctx, "tcp", addr)

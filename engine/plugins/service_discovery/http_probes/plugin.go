@@ -107,14 +107,28 @@ func (hp *httpProbing) Stop() {
 
 func (hp *httpProbing) query(e *et.Event, entity *dbt.Entity, target string, port int) []*support.Finding {
 	var findings []*support.Finding
+
+	// An HTTP probe connects to the target, so it is active traffic and must
+	// use the active egress client. Fail closed when active+strict has no
+	// proxy; use the default Probe client only when the operator opted out.
+	client, err := support.ActiveHTTPClient(e.Session)
+	if err != nil {
+		hp.log.Error("skipping HTTP probe: no active egress", "target", target, "error", err.Error())
+		return findings
+	}
+
 	e.Session.NetSem().Acquire()
 
 	ctx, cancel := context.WithTimeout(e.Session.Ctx(), 15*time.Second)
 	defer cancel()
 
-	resp, err := amasshttp.RequestWebPage(ctx, e.Session.Clients().Probe, &amasshttp.Request{URL: target})
+	resp, err := amasshttp.RequestWebPage(ctx, client, &amasshttp.Request{URL: target})
 	e.Session.NetSem().Release()
 
+	// A proxy-side failure stops the whole run.
+	if support.CheckActiveHTTPError(e.Session, target, err) {
+		return findings
+	}
 	if err == nil && resp != nil {
 		findings = append(findings, hp.store(e, resp, entity, port)...)
 	}

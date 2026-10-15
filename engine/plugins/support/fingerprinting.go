@@ -13,7 +13,6 @@ import (
 
 	jarm "github.com/caffix/jarm-go"
 	et "github.com/owasp-amass/amass/v5/engine/types"
-	amassnet "github.com/owasp-amass/amass/v5/internal/net"
 	oam "github.com/owasp-amass/open-asset-model"
 	oamdns "github.com/owasp-amass/open-asset-model/dns"
 	"github.com/owasp-amass/open-asset-model/general"
@@ -39,6 +38,14 @@ func JARMFingerprint(sess et.Session, target oam.Asset, portrel *general.PortRel
 	}
 	addr += ":" + strconv.Itoa(portrel.PortNumber)
 
+	// JARM dials the target directly, so it is active traffic and must use
+	// the active egress. ActiveDialer returns an error under active+strict
+	// with no proxy, and fails the session on any proxy failure.
+	dial, derr := ActiveDialer(sess, 5*time.Second)
+	if derr != nil {
+		return "", derr
+	}
+
 	var results []string
 	for _, probe := range jarm.GetProbes(host, portrel.PortNumber) {
 		sess.NetSem().Acquire()
@@ -46,7 +53,6 @@ func JARMFingerprint(sess et.Session, target oam.Asset, portrel *general.PortRel
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		dial := amassnet.NewDialContext(5 * time.Second)
 		c, err := dial(ctx, "tcp", addr)
 		sess.NetSem().Release()
 		if err != nil {

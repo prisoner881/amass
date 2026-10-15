@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"time"
 
 	"github.com/caffix/stringset"
@@ -54,19 +55,25 @@ type Args struct {
 	Ports             afmt.ParseInts
 	Resolvers         *stringset.Set
 	Timeout           int
+	ActiveProxy       string
 	Options           struct {
-		Active       bool
-		Alterations  bool
-		BruteForcing bool
-		DemoMode     bool
-		ListSources  bool
-		NoAlts       bool
-		NoColor      bool
-		NoRecursive  bool
-		Passive      bool
-		Rigid        bool
-		Silent       bool
-		Verbose      bool
+		Active bool
+		// ActiveStrict is parsed with a default of true; ActiveStrictSet
+		// records whether the operator actually passed -active-strict, so
+		// "default true" can be told apart from "user set it".
+		ActiveStrict    bool
+		ActiveStrictSet bool
+		Alterations     bool
+		BruteForcing    bool
+		DemoMode        bool
+		ListSources     bool
+		NoAlts          bool
+		NoColor         bool
+		NoRecursive     bool
+		Passive         bool
+		Rigid           bool
+		Silent          bool
+		Verbose         bool
 	}
 	Filepaths struct {
 		AllFilePrefix string
@@ -104,6 +111,8 @@ func defineArgumentFlags(fs *flag.FlagSet, args *Args) {
 	fs.Var(args.Excluded, "exclude", "Data source names separated by commas to be excluded")
 	fs.Var(args.Included, "include", "Data source names separated by commas to be included")
 	fs.StringVar(&args.Interface, "iface", "", "Provide the network interface to send traffic through")
+	fs.StringVar(&args.ActiveProxy, "active-proxy", "",
+		"Proxy URL (http://, https://, socks5://, socks5h://) for ALL -active egress")
 	fs.IntVar(&args.MaxDepth, "max-depth", 0, "Maximum number of subdomain labels for brute forcing")
 	fs.IntVar(&args.MinForRecursive, "min-for-recursive", 1, "Subdomain labels seen before recursive brute forcing (Default: 1)")
 	fs.Var(&args.Ports, "p", "Ports separated by commas (default: 80, 443)")
@@ -115,7 +124,9 @@ func defineArgumentFlags(fs *flag.FlagSet, args *Args) {
 func defineOptionFlags(fs *flag.FlagSet, args *Args) {
 	fs.BoolVar(&args.Help, "h", false, "Show the program usage message")
 	fs.BoolVar(&args.Help, "help", false, "Show the program usage message")
-	fs.BoolVar(&args.Options.Active, "active", false, "Attempt zone transfers and certificate name grabs")
+	fs.BoolVar(&args.Options.Active, "active", false, "Actively probe target hosts: port scans, HTTP/HTTPS, banner, TLS certificate and JARM probes")
+	fs.BoolVar(&args.Options.ActiveStrict, "active-strict", true,
+		"With -active, refuse to run if no -active-proxy is configured")
 	fs.BoolVar(&args.Options.BruteForcing, "brute", false, "Execute brute forcing after searches")
 	fs.BoolVar(&args.Options.DemoMode, "demo", false, "Censor output to make it suitable for demonstrations")
 	fs.BoolVar(&args.Options.ListSources, "list", false, "Print the names of all available data sources")
@@ -265,6 +276,9 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 	}
 
 	done := make(chan struct{}, 1)
+	// Set when the engine reports a fatal failure (e.g. active-proxy failure),
+	// so CLIWorkflow exits non-zero and enum-companies.py stops the queue.
+	var runFailed atomic.Bool
 	startEndWork := func(reason string) {
 		fmt.Println(reason)
 		_, _ = afmt.R.Fprintf(color.Error, "%s\n", reason)
@@ -325,6 +339,21 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 						_ = term.Reset(timeoutDur)
 					}
 					continue
+				}
+				// A fatal engine-side failure (e.g. an active-proxy failure)
+				// stops the whole run immediately with a non-zero exit.
+				if stats.Failed {
+					msg := stats.FailReason
+					if msg == "" {
+						msg = "the engine stopped the session with a fatal error"
+					}
+					fmt.Printf("Enumeration stopped: %s\n", msg)
+					_, _ = afmt.R.Fprintf(color.Error, "Enumeration stopped: %s\n", msg)
+					l.Error("enumeration stopped by a fatal engine error", "reason", msg,
+						"session", token.String())
+					runFailed.Store(true)
+					close(done)
+					return
 				}
 				if !args.Options.Silent {
 					stotal := max(count, stats.WorkItemsTotal)
@@ -427,6 +456,16 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 		fmt.Printf("\nSession Scope\n")
 		printScope(c, token)
 	}
+
+	if runFailed.Load() {
+		// Terminate the (already-killed) session for cleanup, then exit
+		// non-zero. The deferred TerminateSession would not run after
+		// os.Exit, so do it explicitly.
+		tctx, tcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = c.TerminateSession(tctx, token)
+		tcancel()
+		os.Exit(1)
+	}
 }
 
 func getStats(c *client.Client, token uuid.UUID) (*et.SessionStats, error) {
@@ -478,6 +517,13 @@ func argsAndConfig(cmdName string, clArgs []string) (*config.Config, *Args) {
 		_, _ = afmt.R.Fprintf(color.Error, "%v\n", err)
 		os.Exit(1)
 	}
+	// Record whether -active-strict was actually supplied, so the config-level
+	// default (true) is only overridden when the operator set the flag.
+	fs.Visit(func(fl *flag.Flag) {
+		if fl.Name == "active-strict" {
+			args.Options.ActiveStrictSet = true
+		}
+	})
 	if args.Help {
 		usage()
 		return nil, &args
@@ -520,6 +566,18 @@ func argsAndConfig(cmdName string, clArgs []string) (*config.Config, *Args) {
 	if !cfg.Active && len(args.Ports) > 0 {
 		_, _ = afmt.R.Fprintln(color.Error, "Ports can only be scanned in the active mode")
 		os.Exit(1)
+	}
+	if cfg.Active && cfg.ActiveProxy == "" && cfg.ActiveStrict {
+		_, _ = afmt.R.Fprintln(color.Error,
+			"-active was set but no -active-proxy is configured. The default policy is "+
+				"fail-closed: active traffic will not be sent out the default egress. Pass "+
+				"-active-proxy <url>, or -active-strict=false to allow the default egress.")
+		os.Exit(1)
+	}
+	if cfg.ActiveProxy != "" && !cfg.Active {
+		_, _ = afmt.Y.Fprintln(color.Error,
+			"-active-proxy was provided but -active is not set; the proxy is only used for "+
+				"active-mode traffic and will have no effect.")
 	}
 	if len(cfg.Domains()) == 0 {
 		_, _ = afmt.R.Fprintln(color.Error, "Configuration error: No root domain names were provided")
@@ -575,6 +633,13 @@ func (e Args) OverrideConfig(conf *config.Config) error {
 	if e.Options.Active {
 		conf.Active = true
 		conf.Passive = false
+	}
+	if e.ActiveProxy != "" {
+		conf.ActiveProxy = e.ActiveProxy
+	}
+	// Only override the strict default when the operator actually passed it.
+	if e.Options.ActiveStrictSet {
+		conf.ActiveStrict = e.Options.ActiveStrict
 	}
 	if e.Blacklist.Len() > 0 {
 		conf.Scope.Blacklist = e.Blacklist.Slice()

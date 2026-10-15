@@ -19,6 +19,13 @@ definitions:
         type: object
       name:
         type: string
+      options:
+        additionalProperties:
+          type: integer
+        description: |-
+          Options holds source-specific integer settings, such as a credit
+          budget, read by the source's plugin through IntOption.
+        type: object
       ttl:
         type: integer
     type: object
@@ -115,7 +122,26 @@ definitions:
   github_com_owasp-amass_amass_v5_config.Config:
     properties:
       active:
-        description: Determines if zone transfers will be attempted
+        description: |-
+          Enables active probing of target hosts: port scans, HTTP/HTTPS service
+          probes, banner and TLS certificate probes, and JARM fingerprinting
+        type: boolean
+      active_proxy:
+        description: |-
+          ActiveProxy is the runtime proxy URL through which all -active traffic
+          (HTTP probes and raw TLS/JARM dials) must egress. Passive traffic (data
+          sources, general/crawl clients) and all DNS are unaffected and continue
+          to use the default networking path. Supported schemes: http, https,
+          socks5, socks5h.
+        type: string
+      active_strict:
+        description: |-
+          ActiveStrict, when true (the default), makes the engine refuse to start
+          an active run that has no ActiveProxy configured, so active traffic
+          cannot egress out of the default network by accident. Set it to false
+          to allow active traffic over the default egress (for testing, or for a
+          target that can be probed without the proxy). When an ActiveProxy IS
+          configured, all active traffic goes through it regardless of this flag.
         type: boolean
       alt_worldlist:
         items:
@@ -189,6 +215,38 @@ definitions:
       entityID:
         type: string
     type: object
+  v1.BacklogBucket:
+    properties:
+      asset_type:
+        type: string
+      leased:
+        type: integer
+      processed:
+        type: integer
+      queue:
+        type: integer
+      waiting:
+        type: integer
+    type: object
+  v1.BacklogResponse:
+    properties:
+      active_connections:
+        type: integer
+      active_scan_conns:
+        type: integer
+      buckets:
+        items:
+          $ref: '#/definitions/v1.BacklogBucket'
+        type: array
+      max_connections:
+        type: integer
+      max_scan_conns:
+        type: integer
+      prefilter_open:
+        type: integer
+      prefilter_scanned:
+        type: integer
+    type: object
   v1.BulkAddAssetsRequest:
     properties:
       items:
@@ -221,6 +279,24 @@ definitions:
         type: string
       error:
         type: string
+    type: object
+  v1.HandlerStat:
+    properties:
+      avg_duration_ns:
+        type: number
+      call_count:
+        type: integer
+      handler:
+        type: string
+    type: object
+  v1.HandlerStatsResponse:
+    properties:
+      handlers:
+        items:
+          $ref: '#/definitions/v1.HandlerStat'
+        type: array
+      window_minutes:
+        type: integer
     type: object
   v1.HealthCheckResponse:
     properties:
@@ -266,6 +342,27 @@ info:
   title: Amass Engine API (v1)
   version: "1.0"
 paths:
+  /handler-stats:
+    get:
+      description: Queries InfluxDB for the handler_duration measurement written by
+        the engine's pipeline task wrapper, returning average duration and call count
+        per handler over the last 15 minutes, sorted slowest first. Not session-scoped
+        - see the note above GetBacklogHandler for why. Returns 503 if INFLUX_* environment
+        variables are not configured.
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/v1.HandlerStatsResponse'
+        "503":
+          description: InfluxDB not configured or unreachable
+          schema:
+            $ref: '#/definitions/v1.ErrorResponse'
+      summary: Get per-handler average execution time
+      tags:
+      - telemetry
   /health:
     get:
       description: Returns a simple health indicator that the Amass Engine API is
@@ -436,6 +533,40 @@ paths:
       summary: Add assets in bulk (typed by path)
       tags:
       - assets
+  /sessions/{session_token}/backlog:
+    get:
+      description: 'Returns, for each asset type with any activity, the number of
+        entities waiting, currently leased (in flight), sitting in the pipeline''s
+        own internal queue, and already processed - plus session-wide connection semaphore
+        utilization and cumulative port_prefilter statistics. Development/testing
+        tooling: PrefilterScanned/PrefilterOpen use plain, session-independent counters
+        (see support.PrefilterStats), correct for this fork''s one-session-per-process
+        deployment model but not intended for use in a multi-session or long-lived-process
+        deployment.'
+      parameters:
+      - description: Session token (UUID)
+        in: path
+        name: session_token
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/v1.BacklogResponse'
+        "400":
+          description: Invalid session token
+          schema:
+            $ref: '#/definitions/v1.ErrorResponse'
+        "404":
+          description: Session not found
+          schema:
+            $ref: '#/definitions/v1.ErrorResponse'
+      summary: Get per-asset-type backlog counts for a session
+      tags:
+      - sessions
   /sessions/{session_token}/scope/{asset_type}:
     get:
       description: Returns the scoped assets for the given session and asset type

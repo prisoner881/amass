@@ -276,7 +276,10 @@ func PrefilterStats() (scanned, open int64) {
 // pipeline.
 func scanPorts(ctx context.Context, dial amassnet.DialContext, addr string, ports []int, scansem et.SessionSemaphone) []int {
 	if dial == nil {
-		dial = amassnet.NewDialContext(PortPrefilterScanTimeout)
+		// Fail closed: callers must supply a dialer (support.ActiveDialer).
+		// A nil dial used to become a direct connection, which would leak
+		// active scan traffic when a proxy is configured. Scan nothing.
+		return nil
 	}
 
 	sem := make(chan struct{}, maxConcurrentPortsPerIP)

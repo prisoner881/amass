@@ -58,15 +58,40 @@ type Session struct {
 
 // CreateSession initializes a new Session object based on the provided configuration.
 // The session object represents the state of an active engine enumeration.
+// activeProxyHealthTarget is the destination the start-up proxy health check
+// asks the proxy to relay to. It only needs to prove the proxy is reachable
+// and willing to relay; whether this host accepts the connection does not
+// matter. Cloudflare's 1.1.1.1:443 is a stable, well-known endpoint.
+const activeProxyHealthTarget = "1.1.1.1:443"
+
 func CreateSession(mgr *manager, reg et.Registry, cfg *config.Config) (et.Session, error) {
 	// Use default configuration if none is provided
 	if cfg == nil {
 		cfg = config.NewConfig()
 	}
 
-	clients, err := NewClients(len(cfg.Scope.Ports))
+	clients, err := NewClients(len(cfg.Scope.Ports), cfg.ActiveProxy)
 	if err != nil {
 		return nil, err
+	}
+	// Fail closed at session creation: active mode with strict policy on but
+	// no usable active egress refuses the session rather than letting active
+	// traffic leak out the default network.
+	if cfg.Active && cfg.ActiveStrict && clients.ActiveEgress == nil {
+		clients.CloseIdleConnections()
+		return nil, fmt.Errorf("active mode requires an active_proxy when active_strict is on; refusing to create session")
+	}
+	// Start-up proxy check: when an active proxy is configured, confirm it is
+	// reachable and will relay before any work is dispatched. A dead proxy
+	// fails the session here rather than mid-run.
+	if clients.ActiveEgress != nil {
+		hctx, hcancel := context.WithTimeout(context.Background(), 12*time.Second)
+		err := clients.ActiveEgress.HealthCheck(hctx, activeProxyHealthTarget)
+		hcancel()
+		if err != nil {
+			clients.CloseIdleConnections()
+			return nil, fmt.Errorf("active proxy %s is not usable: %w", cfg.ActiveProxy, err)
+		}
 	}
 
 	startTime := time.Now()
@@ -177,7 +202,18 @@ func (s *Session) Clients() *et.SessionHTTPClients {
 		General: s.clients.General,
 		Probe:   s.clients.Probe,
 		Crawl:   s.clients.Crawl,
+		Active:  s.clients.Active,
 	}
+}
+
+// ActiveEgress returns the operator-specified active egress profile, or nil
+// when no active proxy is configured. Active-only code paths must use this
+// (or s.Clients().Active) instead of the default dialers.
+func (s *Session) ActiveEgress() *amassnet.ActiveEgress {
+	if s.clients == nil {
+		return nil
+	}
+	return s.clients.ActiveEgress
 }
 
 func (s *Session) CIDRanger() cidranger.Ranger {
@@ -194,6 +230,23 @@ func (s *Session) Stats() *et.SessionStats {
 
 func (s *Session) Done() bool {
 	return s.finished
+}
+
+// FailActive records a fatal error and kills the session. The first caller
+// wins, so a storm of proxy failures records one reason. The failure is
+// surfaced in SessionStats, which the enum CLI polls to abort the run.
+func (s *Session) FailActive(reason string) {
+	s.stats.Lock()
+	if s.stats.Failed {
+		s.stats.Unlock()
+		return
+	}
+	s.stats.Failed = true
+	s.stats.FailReason = reason
+	s.stats.Unlock()
+
+	s.log.Error("session failed; stopping", "reason", reason)
+	s.Kill()
 }
 
 func (s *Session) Kill() {
