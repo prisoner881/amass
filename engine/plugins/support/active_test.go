@@ -269,3 +269,133 @@ func TestCheckActiveHTTPError(t *testing.T) {
 		t.Error("a proxy error did not fail the session")
 	}
 }
+
+// countingListener accepts connections and counts them, so a test can compare
+// how many connections the target saw with how many the proxy relayed.
+type countingListener struct {
+	ln net.Listener
+	mu sync.Mutex
+	n  int
+}
+
+func newCountingListener(t *testing.T) *countingListener {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cl := &countingListener{ln: ln}
+	go func() {
+		for {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			cl.mu.Lock()
+			cl.n++
+			cl.mu.Unlock()
+			_ = c.Close()
+		}
+	}()
+	t.Cleanup(func() { _ = ln.Close() })
+	return cl
+}
+
+func (c *countingListener) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.n
+}
+
+func (c *countingListener) port() int {
+	return c.ln.Addr().(*net.TCPAddr).Port
+}
+
+// No leakage: scan a set of ports (some open, some closed) through the proxy.
+// Every connection attempt must arrive at the proxy, and every connection the
+// target accepted must have been relayed by it, so the target saw exactly the
+// connections the proxy made on its behalf and nothing came in directly.
+func TestScanPortsLeaksNothingAroundTheProxy(t *testing.T) {
+	var open []*countingListener
+	var ports []int
+	for i := 0; i < 5; i++ {
+		l := newCountingListener(t)
+		open = append(open, l)
+		ports = append(ports, l.port())
+	}
+	for i := 0; i < 15; i++ { // closed ports
+		_, p, _ := net.SplitHostPort(deadAddr(t))
+		n, _ := strconv.Atoi(p)
+		ports = append(ports, n)
+	}
+
+	proxy := startTinySOCKS5(t, 0)
+	ae, err := amassnet.NewActiveEgress("socks5://"+proxy.addr(), 3*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sess := newActiveSession(true, ae)
+	dial, err := ActiveDialer(sess, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	got := scanPorts(context.Background(), dial, "127.0.0.1", ports, nil)
+	time.Sleep(100 * time.Millisecond) // let the listeners finish counting
+
+	if len(got) != len(open) {
+		t.Errorf("found %d open ports, want %d", len(got), len(open))
+	}
+	if seen := len(proxy.seen()); seen != len(ports) {
+		t.Errorf("proxy relayed %d connection attempts, want all %d scanned ports", seen, len(ports))
+	}
+	var targetSaw int
+	for _, l := range open {
+		targetSaw += l.count()
+	}
+	if targetSaw != len(open) {
+		t.Errorf("target saw %d connections, want %d (one per open port, all via the proxy)", targetSaw, len(open))
+	}
+	if sess.failed {
+		t.Errorf("session failed during a healthy scan: %s", sess.failWhy)
+	}
+}
+
+// A nil dialer must scan nothing: it never falls back to a direct connection.
+func TestScanPortsNilDialerScansNothing(t *testing.T) {
+	l := newCountingListener(t)
+	if got := scanPorts(context.Background(), nil, "127.0.0.1", []int{l.port()}, nil); len(got) != 0 {
+		t.Errorf("nil dialer returned open ports %v", got)
+	}
+	time.Sleep(100 * time.Millisecond)
+	if l.count() != 0 {
+		t.Errorf("a nil dialer connected directly (%d connections)", l.count())
+	}
+}
+
+// -active-strict=false only matters when there is no proxy. With a proxy
+// configured, active traffic goes through it whatever the flag says.
+func TestProxyWinsEvenWhenStrictIsOff(t *testing.T) {
+	backend := newCountingListener(t)
+	proxy := startTinySOCKS5(t, 0)
+	ae, _ := amassnet.NewActiveEgress("socks5://"+proxy.addr(), 3*time.Second)
+	sess := newActiveSession(false, ae) // strict OFF, proxy set
+
+	dial, err := ActiveDialer(sess, 2*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn, err := dial(context.Background(), "tcp", "127.0.0.1:"+strconv.Itoa(backend.port()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+	time.Sleep(50 * time.Millisecond)
+
+	if len(proxy.seen()) != 1 {
+		t.Errorf("with strict off and a proxy set, the dial did not go through the proxy (proxy saw %v)", proxy.seen())
+	}
+	if c, err := ActiveHTTPClient(sess); err != nil || c != ae.Client {
+		t.Errorf("with strict off and a proxy set, the HTTP client is not the proxied one")
+	}
+}

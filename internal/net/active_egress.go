@@ -256,14 +256,17 @@ func classifySOCKSDialError(proxyHost, addr string, err error) error {
 	switch {
 	case strings.Contains(msg, "general socks server failure"),
 		strings.Contains(msg, "not allowed by ruleset"),
-		strings.Contains(msg, "ttl expired"),
 		strings.Contains(msg, "command not supported"),
 		strings.Contains(msg, "address type not supported"):
 		return proxyErrorf("active proxy %s refused to relay to %s: %w", proxyHost, addr, err)
 	case strings.Contains(msg, "connection refused"),
 		strings.Contains(msg, "host unreachable"),
-		strings.Contains(msg, "network unreachable"):
+		strings.Contains(msg, "network unreachable"),
+		strings.Contains(msg, "ttl expired"):
 		// Relayed target answer: an ordinary scan result, not a proxy fault.
+		// "TTL expired" (reply 0x06) is how Tor and Dante report a target that
+		// never answered, i.e. a filtered port; treating it as a proxy failure
+		// would end a run on the first filtered port.
 		return err
 	default:
 		// Anything else talking to the proxy (auth, protocol) is a proxy fault.

@@ -70,6 +70,13 @@ func (j *jarmPlugin) check(e *et.Event) error {
 		return errors.New("failed to extract the Service asset")
 	}
 
+	// JARM opens TLS connections to the target, so it is active traffic and
+	// runs only in active mode, like the other active probes. Checked before
+	// anything is marked, so a skipped run is not recorded as a completed one.
+	if !e.Session.Config().Active {
+		return nil
+	}
+
 	since, err := support.TTLStartTime(e.Session.Config(), string(oam.Service), string(oam.Service), j.name)
 	if err != nil {
 		return err

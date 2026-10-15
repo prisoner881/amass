@@ -252,3 +252,108 @@ func closedLocalAddr(t *testing.T) string {
 	_ = ln.Close()
 	return addr
 }
+
+// Which SOCKS5 reply codes end the run. Codes about the proxy's own state or
+// policy are proxy failures; codes that report what happened at the target
+// (unreachable, refused, no answer within the TTL) are ordinary scan results.
+// "TTL expired" in particular is how Tor and Dante report a filtered port, so
+// treating it as a proxy failure would end a run on the first one.
+func TestSOCKSReplyCodeClassification(t *testing.T) {
+	cases := []struct {
+		code      byte
+		name      string
+		wantProxy bool
+	}{
+		{1, "general SOCKS server failure", true},
+		{2, "not allowed by ruleset", true},
+		{3, "network unreachable", false},
+		{4, "host unreachable", false},
+		{5, "connection refused", false},
+		{6, "TTL expired (filtered port)", false},
+		{7, "command not supported", true},
+		{8, "address type not supported", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			f := newFakeSOCKS5(t, c.code)
+			ae, _ := NewActiveEgress("socks5://"+f.addr(), 5*time.Second)
+			_, err := ae.DialContext(context.Background(), "tcp", "192.0.2.10:443")
+			if err == nil {
+				t.Fatal("expected a dial error")
+			}
+			if got := IsProxyError(err); got != c.wantProxy {
+				t.Errorf("reply %d (%s): IsProxyError=%v, want %v (err=%v)", c.code, c.name, got, c.wantProxy, err)
+			}
+		})
+	}
+}
+
+// The HTTP client wraps the dial error in a *url.Error. A dead proxy must
+// still be recognised through that wrapping, for plain HTTP, HTTPS and an
+// HTTP-CONNECT proxy, because this is how HTTP-Probes finds out the proxy is
+// gone mid-run.
+func TestActiveHTTPClientDeadProxyIsProxyError(t *testing.T) {
+	for _, tc := range []struct{ name, scheme, target string }{
+		{"socks5 http", "socks5", "http://192.0.2.10/"},
+		{"socks5 https", "socks5", "https://192.0.2.10/"},
+		{"connect http", "http", "http://192.0.2.10/"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ae, err := NewActiveEgress(tc.scheme+"://"+closedLocalAddr(t), 3*time.Second)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, err = ae.Client.Get(tc.target)
+			if err == nil || !IsProxyError(err) {
+				t.Fatalf("dead proxy not recognised through the HTTP client: %v", err)
+			}
+		})
+	}
+}
+
+// An HTTP CONNECT proxy that denies the connection (auth or ACL) is a proxy
+// failure; one that reports the upstream as unreachable (502/504) is a target
+// answer.
+func TestConnectStatusClassification(t *testing.T) {
+	for _, tc := range []struct {
+		code      int
+		wantProxy bool
+	}{
+		{http.StatusProxyAuthRequired, true},
+		{http.StatusForbidden, true},
+		{http.StatusServiceUnavailable, true},
+		{http.StatusBadGateway, false},
+		{http.StatusGatewayTimeout, false},
+	} {
+		ln, err := net.Listen("tcp", "127.0.0.1:0")
+		if err != nil {
+			t.Fatal(err)
+		}
+		go func(code int) {
+			c, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+			buf := make([]byte, 1024)
+			_, _ = c.Read(buf)
+			_, _ = io.WriteString(c, "HTTP/1.1 "+itoaInt(code)+" X\r\nContent-Length: 0\r\n\r\n")
+		}(tc.code)
+
+		ae, _ := NewActiveEgress("http://"+ln.Addr().String(), 3*time.Second)
+		_, derr := ae.DialContext(context.Background(), "tcp", "192.0.2.10:443")
+		_ = ln.Close()
+		if derr == nil {
+			t.Fatalf("status %d: expected an error", tc.code)
+		}
+		if got := IsProxyError(derr); got != tc.wantProxy {
+			t.Errorf("CONNECT %d: IsProxyError=%v, want %v (err=%v)", tc.code, got, tc.wantProxy, derr)
+		}
+	}
+}
+
+func itoaInt(n int) string {
+	return strings.TrimLeft(string([]byte{
+		byte('0' + n/100%10), byte('0' + n/10%10), byte('0' + n%10),
+	}), "0")
+}
