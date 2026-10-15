@@ -24,7 +24,8 @@ definitions:
           type: integer
         description: |-
           Options holds source-specific integer settings, such as a credit
-          budget, read by the source's plugin through IntOption.
+          budget, read by the source's plugin through IntOption. Prospeo reads
+          max_emails_per_domain and min_remaining_credits.
         type: object
       ttl:
         type: integer
@@ -83,9 +84,12 @@ definitions:
           type: string
         type: array
       cidrs:
-        description: CIDR IPNET
+        description: |-
+          CIDRs in scope. In JSON each is Go's net.IPNet encoding, an object
+          such as {"IP": "198.51.100.0", "Mask": "////AA=="}, where Mask is the
+          base64 of the mask bytes; a plain "198.51.100.0/24" string is rejected
         items:
-          $ref: '#/definitions/net.IPNet'
+          type: object
         type: array
       domains:
         description: The root domain names that the enumeration will target
@@ -93,15 +97,12 @@ definitions:
           type: string
         type: array
       ips:
-        description: IP Net.IP
+        description: IP addresses in scope, as strings such as "192.0.2.10" or "2001:db8::1"
         items:
-          items:
-            format: int32
-            type: integer
-          type: array
+          type: string
         type: array
       ports:
-        description: The ports checked for certificates
+        description: The ports scanned and probed in active mode, as a list of integers
         items:
           type: integer
         type: array
@@ -129,10 +130,10 @@ definitions:
       active_proxy:
         description: |-
           ActiveProxy is the runtime proxy URL through which all -active traffic
-          (HTTP probes and raw TLS/JARM dials) must egress. Passive traffic (data
-          sources, general/crawl clients) and all DNS are unaffected and continue
-          to use the default networking path. Supported schemes: http, https,
-          socks5, socks5h.
+          (port scans, HTTP/HTTPS probes, banner and TLS certificate probes, and
+          JARM) must egress. Passive traffic (data sources, registry lookups) and
+          all DNS are unaffected and continue to use the default networking path.
+          Supported schemes: http, https, socks5, socks5h.
         type: string
       active_strict:
         description: |-
@@ -195,20 +196,22 @@ definitions:
           type: string
         type: array
     type: object
-  net.IPNet:
+  support.EndWorkProgress:
     properties:
-      ip:
-        description: network number
-        items:
-          format: int32
-          type: integer
-        type: array
-      mask:
-        description: network mask
-        items:
-          format: int32
-          type: integer
-        type: array
+      candidates:
+        type: integer
+      done:
+        type: boolean
+      leased:
+        type: integer
+      phase:
+        type: string
+      processed:
+        type: integer
+      requeued:
+        type: integer
+      waiting:
+        type: integer
     type: object
   v1.AddAssetResponse:
     properties:
@@ -382,7 +385,11 @@ paths:
       consumes:
       - application/json
       description: Creates a new Amass engine session using the provided configuration
-        JSON.
+        JSON. The session does no work until seed assets are posted to /sessions/{session_token}/assets,
+        and its handlers run only for the transformations in the configuration. With
+        active set to true, the request is refused with 400 when no active_proxy is
+        configured and active_strict is not false, and with 500 when the active_proxy
+        cannot be reached or will not relay; the reason is in details.
       parameters:
       - description: Engine configuration
         in: body
@@ -398,11 +405,12 @@ paths:
           schema:
             $ref: '#/definitions/v1.CreateSessionResponse'
         "400":
-          description: Invalid JSON or invalid configuration
+          description: Invalid JSON, or invalid configuration (including the active-egress
+            policy)
           schema:
             $ref: '#/definitions/v1.ErrorResponse'
         "500":
-          description: Failed to create session
+          description: Failed to create session (including an unusable active_proxy)
           schema:
             $ref: '#/definitions/v1.ErrorResponse'
       summary: Create a new engine session
@@ -410,7 +418,9 @@ paths:
       - sessions
   /sessions/{session_token}:
     delete:
-      description: Cancels an active session. Returns no content on success.
+      description: Stops the session immediately and returns 204. The token is invalid
+        from that point. Cleanup (backlog, temporary directory, database connection)
+        finishes in the background about 10 seconds later.
       parameters:
       - description: Session token (UUID)
         in: path
@@ -444,8 +454,8 @@ paths:
         name: session_token
         required: true
         type: string
-      - description: Asset type (e.g., autonomous_system, fqdn, ipaddress, netblock,
-          location, organization)
+      - description: 'Asset type: the Open Asset Model type name in lowercase with
+          no separators (e.g., fqdn, ipaddress, netblock, autonomoussystem, organization)'
         in: path
         name: asset_type
         required: true
@@ -494,8 +504,8 @@ paths:
         name: session_token
         required: true
         type: string
-      - description: Asset type (e.g., autonomous_system, fqdn, ipaddress, netblock,
-          location, organization)
+      - description: 'Asset type: the Open Asset Model type name in lowercase with
+          no separators (e.g., fqdn, ipaddress, netblock, autonomoussystem, organization)'
         in: path
         name: asset_type
         required: true
@@ -567,6 +577,65 @@ paths:
       summary: Get per-asset-type backlog counts for a session
       tags:
       - sessions
+  /sessions/{session_token}/end-work:
+    get:
+      description: Reports the progress of the work started by POST /sessions/{session_token}/end-work.
+        done becomes true when that work has finished, and stays false if it was never
+        started. phase is one of none, owned-fill, idle-wait, listing, requeue, drain
+        or done. candidates and requeued are the sweep's counts; waiting, leased and
+        processed are the IPAddress backlog counts.
+      parameters:
+      - description: Session token (UUID)
+        in: path
+        name: session_token
+        required: true
+        type: string
+      produces:
+      - application/json
+      responses:
+        "200":
+          description: OK
+          schema:
+            $ref: '#/definitions/support.EndWorkProgress'
+        "400":
+          description: Invalid session token
+          schema:
+            $ref: '#/definitions/v1.ErrorResponse'
+        "404":
+          description: Session not found
+          schema:
+            $ref: '#/definitions/v1.ErrorResponse'
+      summary: Get session-end work progress
+      tags:
+      - sessions
+    post:
+      description: 'Starts the session-end work in the background: the owned-netblock
+        fill, then the Protocol-Probes sweep of IPs that were missed. Both run only
+        when the session has active set to true; otherwise the work finishes at once.
+        Only the first request for a session starts the work; later requests return
+        202 and do nothing. The session keeps running, so stats and end-work progress
+        stay available. Poll GET /sessions/{session_token}/end-work until done is
+        true.'
+      parameters:
+      - description: Session token (UUID)
+        in: path
+        name: session_token
+        required: true
+        type: string
+      responses:
+        "202":
+          description: Accepted; the work runs in the background
+        "400":
+          description: Invalid session token
+          schema:
+            $ref: '#/definitions/v1.ErrorResponse'
+        "404":
+          description: Session not found
+          schema:
+            $ref: '#/definitions/v1.ErrorResponse'
+      summary: Start session-end work
+      tags:
+      - sessions
   /sessions/{session_token}/scope/{asset_type}:
     get:
       description: Returns the scoped assets for the given session and asset type
@@ -577,8 +646,8 @@ paths:
         name: session_token
         required: true
         type: string
-      - description: Asset type (e.g., autonomoussystem, fqdn, ipaddress, netblock,
-          location, organization)
+      - description: 'Asset type: autonomoussystem, fqdn, ipaddress, netblock, location
+          or organization'
         in: path
         name: asset_type
         required: true
@@ -603,7 +672,10 @@ paths:
       - scope
   /sessions/{session_token}/stats:
     get:
-      description: Returns the current runtime statistics for a session.
+      description: 'Returns the session''s work-item counts, recalculated every 2
+        seconds from the backlog across all asset types: workItemsCompleted is the
+        number processed, workItemsTotal is processed plus waiting plus leased. The
+        session is idle when the two are equal.'
       parameters:
       - description: Session token (UUID)
         in: path
@@ -630,9 +702,12 @@ paths:
       - sessions
   /sessions/{session_token}/ws/logs:
     get:
-      description: |-
-        Upgrades the HTTP connection to a WebSocket and streams session log lines as UTF-8 text frames.
-        The server sends periodic ping frames (~30s) and expects pong responses; idle connections may be closed.
+      description: Upgrades the HTTP connection to a WebSocket and streams the session's
+        log records as UTF-8 text frames, one JSON object per frame. Only records
+        written while at least one client is connected are delivered; nothing is buffered
+        for later. The server sends a ping every 30 seconds and never reads client
+        messages, so a client must keep reading the connection (which answers the
+        pings). Keep one connection open for the life of the session.
       parameters:
       - description: Session token (UUID)
         in: path
