@@ -107,7 +107,8 @@ type Config struct {
 	// Only access the data sources for names and return results?
 	Passive bool `yaml:"-" json:"-"`
 
-	// Determines if zone transfers will be attempted
+	// Enables active probing of target hosts: port scans, HTTP/HTTPS service
+	// probes, banner and TLS certificate probes, and JARM fingerprinting
 	Active bool `yaml:"active,omitempty" json:"active,omitempty"`
 
 	// ActiveProxy is the runtime proxy URL through which all -active traffic
@@ -258,16 +259,8 @@ func (c *Config) CheckSettings() error {
 		return errors.New("active enumeration cannot be performed without DNS resolution")
 	}
 
-	if c.Active {
-		if c.ActiveProxy != "" {
-			if perr := validateActiveProxyURL(c.ActiveProxy); perr != nil {
-				return perr
-			}
-		} else if c.ActiveStrict {
-			return errors.New("active mode is enabled but no active_proxy is configured: " +
-				"set -active-proxy / active_proxy: in the YAML, or pass -active-strict=false " +
-				"to allow active traffic over the default egress (not recommended)")
-		}
+	if err := c.CheckActiveEgress(); err != nil {
+		return err
 	}
 
 	c.Wordlist, err = ExpandMaskWordlist(c.Wordlist)

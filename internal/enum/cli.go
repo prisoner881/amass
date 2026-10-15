@@ -124,9 +124,9 @@ func defineArgumentFlags(fs *flag.FlagSet, args *Args) {
 func defineOptionFlags(fs *flag.FlagSet, args *Args) {
 	fs.BoolVar(&args.Help, "h", false, "Show the program usage message")
 	fs.BoolVar(&args.Help, "help", false, "Show the program usage message")
-	fs.BoolVar(&args.Options.Active, "active", false, "Attempt zone transfers and certificate name grabs")
+	fs.BoolVar(&args.Options.Active, "active", false, "Actively probe target hosts: port scans, HTTP/HTTPS, banner, TLS certificate and JARM probes")
 	fs.BoolVar(&args.Options.ActiveStrict, "active-strict", true,
-		"With -active, refuse to run if no -active-proxy is configured (default true)")
+		"With -active, refuse to run if no -active-proxy is configured")
 	fs.BoolVar(&args.Options.BruteForcing, "brute", false, "Execute brute forcing after searches")
 	fs.BoolVar(&args.Options.DemoMode, "demo", false, "Censor output to make it suitable for demonstrations")
 	fs.BoolVar(&args.Options.ListSources, "list", false, "Print the names of all available data sources")

@@ -251,3 +251,59 @@ func TestCheckSettings_APIPayloadStrictDefault(t *testing.T) {
 		t.Fatalf("expected fail-closed error mentioning active_proxy when API payload omits active_strict, got: %v", err)
 	}
 }
+
+// TestCheckActiveEgress covers the proxy-only policy check the engine API
+// runs on every new session, and that it leaves the configuration as it
+// found it. CheckSettings, which the handler called before, drops wordlist
+// entries that are not valid masks; the engine never did that to API
+// sessions on the service-detection branch.
+func TestCheckActiveEgress(t *testing.T) {
+	cases := []struct {
+		name    string
+		active  bool
+		proxy   string
+		strict  bool
+		wantErr bool
+	}{
+		{"inactive, strict, no proxy", false, "", true, false},
+		{"inactive, bad proxy ignored", false, "bogus", true, false},
+		{"active, valid proxy", true, "socks5h://127.0.0.1:1080", true, false},
+		{"active, valid proxy, not strict", true, "socks5h://127.0.0.1:1080", false, false},
+		{"active, invalid proxy", true, "127.0.0.1:1080", false, true},
+		{"active, no proxy, strict", true, "", true, true},
+		{"active, no proxy, not strict", true, "", false, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c := NewConfig()
+			c.Active = tc.active
+			c.ActiveProxy = tc.proxy
+			c.ActiveStrict = tc.strict
+			if err := c.CheckActiveEgress(); (err != nil) != tc.wantErr {
+				t.Fatalf("got err=%v wantErr=%v", err, tc.wantErr)
+			}
+		})
+	}
+
+	c := NewConfig()
+	c.Active = true
+	c.ActiveStrict = false
+	c.BruteForcing = true
+	c.Wordlist = []string{"www", "a?x"}
+	c.AltWordlist = []string{"dev", "a?x"}
+	if err := c.CheckActiveEgress(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Join(c.Wordlist, ",") != "www,a?x" || strings.Join(c.AltWordlist, ",") != "dev,a?x" {
+		t.Fatalf("CheckActiveEgress modified the wordlists: %v / %v", c.Wordlist, c.AltWordlist)
+	}
+
+	// The contrast that makes the above meaningful: CheckSettings rewrites
+	// them, dropping the entry that is not a valid mask.
+	if err := c.CheckSettings(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if strings.Join(c.AltWordlist, ",") != "dev" {
+		t.Fatalf("expected CheckSettings to drop the invalid mask, got %v", c.AltWordlist)
+	}
+}

@@ -132,7 +132,9 @@ func (v *V1Handlers) CreateSessionHandler(w http.ResponseWriter, r *http.Request
 	// Validate active egress + strict policy before session creation so direct
 	// API callers get the same fail-closed enforcement as the enum CLI. JSON
 	// payloads do not pass through LoadSettings, so this is checked here.
-	if err := config.CheckSettings(); err != nil {
+	// Only the egress policy: CheckSettings would also rewrite the wordlists
+	// and add checks the engine never applied to API sessions before.
+	if err := config.CheckActiveEgress(); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid configuration", err)
 		return
 	}

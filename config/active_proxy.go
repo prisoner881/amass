@@ -6,6 +6,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -47,6 +48,27 @@ func validateActiveProxyURL(raw string) error {
 	scheme := strings.ToLower(u.Scheme)
 	if _, ok := supportedActiveProxySchemes[scheme]; !ok {
 		return fmt.Errorf("active_proxy scheme %q is not supported (use http, https, socks5, socks5h)", u.Scheme)
+	}
+	return nil
+}
+
+// CheckActiveEgress enforces the active-egress policy and nothing else: with
+// Active set, a configured ActiveProxy must be a usable proxy URL, and with
+// no proxy the run is refused unless ActiveStrict is off. It does not modify
+// the configuration, so the engine API can call it on every session without
+// the other side effects of CheckSettings (wordlist mask expansion, the
+// brute-force/passive checks), which the engine never applied before.
+func (c *Config) CheckActiveEgress() error {
+	if !c.Active {
+		return nil
+	}
+	if c.ActiveProxy != "" {
+		return validateActiveProxyURL(c.ActiveProxy)
+	}
+	if c.ActiveStrict {
+		return errors.New("active mode is enabled but no active_proxy is configured: " +
+			"set -active-proxy / active_proxy: in the YAML, or pass -active-strict=false " +
+			"to allow active traffic over the default egress (not recommended)")
 	}
 	return nil
 }
