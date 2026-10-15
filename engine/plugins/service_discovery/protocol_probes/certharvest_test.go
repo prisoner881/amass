@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	amassnet "github.com/owasp-amass/amass/v5/internal/net"
 	"math/big"
 	"net"
 	"sync"
@@ -78,7 +79,7 @@ func TestDialAndGetCertChain_RealHandshake(t *testing.T) {
 	cert := generateSelfSignedCert(t, cn)
 	addr := startTLSServer(t, cert)
 
-	certs, err := dialAndGetCertChain(context.Background(), nil, addr, "", 2*time.Second)
+	certs, err := dialAndGetCertChain(context.Background(), amassnet.NewDialContext(2*time.Second), addr, "", 2*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -112,7 +113,7 @@ func TestDialAndGetCertChain_PlainTCPRefusesGracefully(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 	}()
 
-	_, err = dialAndGetCertChain(context.Background(), nil, ln.Addr().String(), "", 1*time.Second)
+	_, err = dialAndGetCertChain(context.Background(), amassnet.NewDialContext(1*time.Second), ln.Addr().String(), "", 1*time.Second)
 	if err == nil {
 		t.Fatal("expected an error connecting to a non-TLS port, got nil")
 	}
@@ -126,7 +127,7 @@ func TestDialAndGetCertChain_ConnectionRefused(t *testing.T) {
 	addr := ln.Addr().String()
 	ln.Close()
 
-	_, err = dialAndGetCertChain(context.Background(), nil, addr, "", 2*time.Second)
+	_, err = dialAndGetCertChain(context.Background(), amassnet.NewDialContext(2*time.Second), addr, "", 2*time.Second)
 	if err == nil {
 		t.Fatal("expected a connection error, got nil")
 	}
@@ -163,18 +164,13 @@ func TestDialAndGetCertChain_UsesInjectedDialer(t *testing.T) {
 	}
 }
 
-func TestDialAndGetCertChain_NilDialerFallsBackToDirect(t *testing.T) {
-	const cn = "direct-fallback-test.example.com"
-	cert := generateSelfSignedCert(t, cn)
+func TestDialAndGetCertChain_NilDialerFailsClosed(t *testing.T) {
+	cert := generateSelfSignedCert(t, "fail-closed.example.com")
 	addr := startTLSServer(t, cert)
 
-	certs, err := dialAndGetCertChain(context.Background(), nil, addr, "", 2*time.Second)
-
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if len(certs) != 1 || certs[0].Subject.CommonName != cn {
-		t.Errorf("did not correctly reach the real server via the direct fallback dialer")
+	// A nil dialer must fail closed, never open a direct connection.
+	if _, err := dialAndGetCertChain(context.Background(), nil, addr, "", 2*time.Second); err == nil {
+		t.Fatal("nil dialer should fail closed")
 	}
 }
 
@@ -219,7 +215,7 @@ func TestDialAndGetCertChain_SendsCorrectSNI(t *testing.T) {
 	}()
 
 	const expectedSNI = "the-resolved-hostname.example.com"
-	_, err = dialAndGetCertChain(context.Background(), nil, ln.Addr().String(), expectedSNI, 2*time.Second)
+	_, err = dialAndGetCertChain(context.Background(), amassnet.NewDialContext(2*time.Second), ln.Addr().String(), expectedSNI, 2*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -271,7 +267,7 @@ func TestDialAndGetCertChain_EmptyServerNameOmitsSNI(t *testing.T) {
 		time.Sleep(300 * time.Millisecond)
 	}()
 
-	_, err = dialAndGetCertChain(context.Background(), nil, ln.Addr().String(), "", 2*time.Second)
+	_, err = dialAndGetCertChain(context.Background(), amassnet.NewDialContext(2*time.Second), ln.Addr().String(), "", 2*time.Second)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

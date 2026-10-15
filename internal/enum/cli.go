@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"sync/atomic"
 	"time"
 
 	"github.com/caffix/stringset"
@@ -275,6 +276,9 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 	}
 
 	done := make(chan struct{}, 1)
+	// Set when the engine reports a fatal failure (e.g. active-proxy failure),
+	// so CLIWorkflow exits non-zero and enum-companies.py stops the queue.
+	var runFailed atomic.Bool
 	startEndWork := func(reason string) {
 		fmt.Println(reason)
 		_, _ = afmt.R.Fprintf(color.Error, "%s\n", reason)
@@ -335,6 +339,21 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 						_ = term.Reset(timeoutDur)
 					}
 					continue
+				}
+				// A fatal engine-side failure (e.g. an active-proxy failure)
+				// stops the whole run immediately with a non-zero exit.
+				if stats.Failed {
+					msg := stats.FailReason
+					if msg == "" {
+						msg = "the engine stopped the session with a fatal error"
+					}
+					fmt.Printf("Enumeration stopped: %s\n", msg)
+					_, _ = afmt.R.Fprintf(color.Error, "Enumeration stopped: %s\n", msg)
+					l.Error("enumeration stopped by a fatal engine error", "reason", msg,
+						"session", token.String())
+					runFailed.Store(true)
+					close(done)
+					return
 				}
 				if !args.Options.Silent {
 					stotal := max(count, stats.WorkItemsTotal)
@@ -436,6 +455,16 @@ func CLIWorkflow(cmdName string, clArgs []string) {
 		progress.Finish()
 		fmt.Printf("\nSession Scope\n")
 		printScope(c, token)
+	}
+
+	if runFailed.Load() {
+		// Terminate the (already-killed) session for cleanup, then exit
+		// non-zero. The deferred TerminateSession would not run after
+		// os.Exit, so do it explicitly.
+		tctx, tcancel := context.WithTimeout(context.Background(), 10*time.Second)
+		_ = c.TerminateSession(tctx, token)
+		tcancel()
+		os.Exit(1)
 	}
 }
 

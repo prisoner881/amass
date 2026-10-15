@@ -2,6 +2,7 @@ package protocol_probes
 
 import (
 	"context"
+	amassnet "github.com/owasp-amass/amass/v5/internal/net"
 	"net"
 	"testing"
 	"time"
@@ -57,7 +58,7 @@ func startSilentServer(t *testing.T) string {
 func TestPeekBanner_ReceivesRealBanner(t *testing.T) {
 	addr := startBannerServer(t, "SSH-2.0-OpenSSH_9.6\r\n")
 
-	result := PeekBanner(context.Background(), nil, addr, 2*time.Second)
+	result := PeekBanner(context.Background(), amassnet.NewDialContext(2*time.Second), addr, 2*time.Second)
 
 	if result.Err != nil {
 		t.Fatalf("unexpected error: %v", result.Err)
@@ -75,7 +76,7 @@ func TestPeekBanner_ReceivesRealBanner(t *testing.T) {
 func TestPeekBanner_SilentServer(t *testing.T) {
 	addr := startSilentServer(t)
 
-	result := PeekBanner(context.Background(), nil, addr, 300*time.Millisecond)
+	result := PeekBanner(context.Background(), amassnet.NewDialContext(2*time.Second), addr, 300*time.Millisecond)
 
 	if result.Err != nil {
 		t.Fatalf("unexpected error: %v", result.Err)
@@ -98,7 +99,7 @@ func TestPeekBanner_ConnectionRefused(t *testing.T) {
 	addr := ln.Addr().String()
 	ln.Close() // release it immediately - nothing is listening now
 
-	result := PeekBanner(context.Background(), nil, addr, 2*time.Second)
+	result := PeekBanner(context.Background(), amassnet.NewDialContext(2*time.Second), addr, 2*time.Second)
 
 	if result.Err == nil {
 		t.Fatal("expected a connection error, got nil")
@@ -114,7 +115,7 @@ func TestPeekBanner_EndToEndClassification(t *testing.T) {
 	// eventual plugin code will do.
 	addr := startBannerServer(t, "SSH-2.0-OpenSSH_9.6\r\n")
 
-	result := PeekBanner(context.Background(), nil, addr, 2*time.Second)
+	result := PeekBanner(context.Background(), amassnet.NewDialContext(2*time.Second), addr, 2*time.Second)
 	guess := ClassifyPeek(result.Data)
 
 	if guess != GuessSSH {
@@ -154,7 +155,7 @@ func TestPeekBanner_NilDialerFallsBackToDirect(t *testing.T) {
 	// real local server reached via a real, direct connection.
 	addr := startBannerServer(t, "220 mail.example.com ESMTP\r\n")
 
-	result := PeekBanner(context.Background(), nil, addr, 2*time.Second)
+	result := PeekBanner(context.Background(), amassnet.NewDialContext(2*time.Second), addr, 2*time.Second)
 
 	if result.Err != nil {
 		t.Fatalf("unexpected error: %v", result.Err)

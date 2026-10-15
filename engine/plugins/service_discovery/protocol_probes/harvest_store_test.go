@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/x509"
 	"fmt"
+	amassnet "github.com/owasp-amass/amass/v5/internal/net"
 	"io"
 	"log/slog"
 	"net"
@@ -132,7 +133,7 @@ func TestHarvestCertificate_FailedHandshakeCreatesNoService(t *testing.T) {
 	}()
 	port := listenerPort(t, ln.Addr().String())
 
-	if err := HarvestCertificate(e, nil, e.Entity, "127.0.0.1", port, time.Second); err == nil {
+	if err := HarvestCertificate(e, amassnet.NewDialContext(time.Second), e.Entity, "127.0.0.1", port, time.Second); err == nil {
 		t.Fatal("expected a handshake error against a non-TLS port")
 	}
 	if svc := findService(t, e, port); svc != nil {
@@ -152,7 +153,7 @@ func TestHarvestCertificate_SuccessStoresAndDispatchesService(t *testing.T) {
 	addr := startTLSServer(t, generateSelfSignedCert(t, "test.example.com"))
 	port := listenerPort(t, addr)
 
-	if err := HarvestCertificate(e, nil, e.Entity, "127.0.0.1", port, 2*time.Second); err != nil {
+	if err := HarvestCertificate(e, amassnet.NewDialContext(2*time.Second), e.Entity, "127.0.0.1", port, 2*time.Second); err != nil {
 		t.Fatalf("unexpected harvest error: %v", err)
 	}
 

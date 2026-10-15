@@ -107,6 +107,11 @@ func (a *ActiveEgress) CloseIdleConnections() {
 // *ProxyError when the proxy itself is the problem. The engine calls this
 // once before dispatching any work, so a dead proxy fails the session at
 // startup rather than silently later.
+// It returns a *ProxyError only when the proxy itself is the problem
+// (unreachable, bad auth, refuses to relay). A connection that the proxy
+// relays — whether it succeeds, or the probe host refuses it — means the
+// proxy works, so HealthCheck returns nil. The engine calls this once before
+// dispatching any work, so a dead proxy fails the session at startup.
 func (a *ActiveEgress) HealthCheck(ctx context.Context, probe string) error {
 	if a == nil {
 		return ErrNoActiveEgress
@@ -116,14 +121,12 @@ func (a *ActiveEgress) HealthCheck(ctx context.Context, probe string) error {
 
 	conn, err := a.DialContext(ctx, "tcp", probe)
 	if err != nil {
-		// A dial failure at this stage reaches the proxy before any target,
-		// so classify it as a proxy failure even when the probe host is the
-		// one refusing: the point is that the operator's egress path is not
-		// usable for active work.
 		if IsProxyError(err) {
 			return err
 		}
-		return proxyErrorf("active proxy %s health check to %s failed: %w", a.Proxy, probe, err)
+		// A relayed target answer (refused/unreachable/timeout) proves the
+		// proxy is usable, which is all the health check needs to confirm.
+		return nil
 	}
 	_ = conn.Close()
 	return nil
@@ -145,7 +148,10 @@ func NewActiveEgress(proxyURL string, probeTimeout time.Duration) (*ActiveEgress
 		return nil, fmt.Errorf("invalid active proxy URL %q: %w", proxyURL, err)
 	}
 
-	dial, err := buildProxyDialContext(u, 8*time.Second)
+	// Per-dial timeout for reaching the proxy and tunnelling to a target.
+	// 6s is 3x the direct connect-scan timeout (PortPrefilterScanTimeout,
+	// 2s), enough headroom for a Tor circuit without hanging the pipeline.
+	dial, err := buildProxyDialContext(u, 6*time.Second)
 	if err != nil {
 		return nil, err
 	}
@@ -227,27 +233,40 @@ func buildProxyDialContext(u *url.URL, perDialTimeout time.Duration) (DialContex
 }
 
 // classifySOCKSDialError decides whether a SOCKS5 dial failure is the proxy's
-// fault or the target's answer relayed back. A failure to reach the proxy
-// host, or a SOCKS reply code about the proxy's own state (general failure,
-// not allowed, TTL expired), is a proxy failure. "Connection refused" and
-// "host unreachable" are the target's answer and pass through unwrapped, so
-// the port scanner records them as a closed/unreachable port.
+// fault or the target's answer relayed back. golang.org/x/net/proxy wraps a
+// failure to reach the proxy as a "socks connect" *net.OpError that nests a
+// "dial" *net.OpError to the proxy host; a relayed target answer is a SOCKS
+// reply status with no nested dial error. So:
+//
+//   - a nested "dial" OpError, or a SOCKS reply about the proxy's own state
+//     (general failure, not allowed, TTL expired) → proxy failure, which
+//     ends the run;
+//   - a relayed "connection refused" / "unreachable" from the target → an
+//     ordinary scan result, passed through unwrapped so the port scanner
+//     records it as a closed/unreachable port.
 func classifySOCKSDialError(proxyHost, addr string, err error) error {
+	// Could not reach the proxy at all: the chain contains a dial OpError.
+	for e := err; e != nil; e = errors.Unwrap(e) {
+		if op, ok := e.(*net.OpError); ok && op.Op == "dial" {
+			return proxyErrorf("active proxy %s is unreachable (dialing %s): %w", proxyHost, addr, err)
+		}
+	}
+
 	msg := strings.ToLower(err.Error())
 	switch {
-	case strings.Contains(msg, "connection refused"),
-		strings.Contains(msg, "host unreachable"),
-		strings.Contains(msg, "network unreachable"):
-		// Relayed target answer: an ordinary scan result, not a proxy fault.
-		return err
 	case strings.Contains(msg, "general socks server failure"),
 		strings.Contains(msg, "not allowed by ruleset"),
 		strings.Contains(msg, "ttl expired"),
 		strings.Contains(msg, "command not supported"),
 		strings.Contains(msg, "address type not supported"):
 		return proxyErrorf("active proxy %s refused to relay to %s: %w", proxyHost, addr, err)
+	case strings.Contains(msg, "connection refused"),
+		strings.Contains(msg, "host unreachable"),
+		strings.Contains(msg, "network unreachable"):
+		// Relayed target answer: an ordinary scan result, not a proxy fault.
+		return err
 	default:
-		// Could not talk to the proxy at all (dial/auth/protocol error).
+		// Anything else talking to the proxy (auth, protocol) is a proxy fault.
 		return proxyErrorf("active proxy %s is unusable (dialing %s): %w", proxyHost, addr, err)
 	}
 }

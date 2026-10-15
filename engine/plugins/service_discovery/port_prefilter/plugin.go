@@ -42,7 +42,6 @@ import (
 
 	"github.com/owasp-amass/amass/v5/engine/plugins/support"
 	et "github.com/owasp-amass/amass/v5/engine/types"
-	amassnet "github.com/owasp-amass/amass/v5/internal/net"
 	oam "github.com/owasp-amass/open-asset-model"
 	oamnet "github.com/owasp-amass/open-asset-model/network"
 )
@@ -103,18 +102,16 @@ func (pp *portPrefilter) check(e *et.Event) error {
 		return nil
 	}
 
-	support.EnsureOpenPortsScanned(e, e.Entity, selectDialer(e))
+	// The connect scan touches the target's ports, so it is active traffic:
+	// support.ActiveDialer routes it through the proxy when one is set, and
+	// a proxy failure fails the whole session. Never scan over the default
+	// network when active+strict has no proxy.
+	dial, err := support.ActiveDialer(e.Session, support.PortPrefilterScanTimeout)
+	if err != nil {
+		e.Session.Log().Error("skipping port prefilter: no active egress",
+			"ip", e.Entity.Asset.Key(), "error", err.Error())
+		return nil
+	}
+	support.EnsureOpenPortsScanned(e, e.Entity, dial)
 	return nil
-}
-
-// selectDialer mirrors protocol_probes' own function of the same name
-// and purpose exactly - a single, deliberate integration point for
-// feature/active-proxy-egress once merged, so this plugin
-// automatically inherits proxy-routed egress without any further
-// changes here, the same reasoning behind PeekBanner's own dial
-// injection in protocol_probes/banner_peek.go. A nil dial (the only
-// option this branch has available today) falls back to
-// support.scanPorts' own use of amassnet.NewDialContext.
-func selectDialer(e *et.Event) amassnet.DialContext {
-	return amassnet.NewDialContext(support.PortPrefilterScanTimeout)
 }
