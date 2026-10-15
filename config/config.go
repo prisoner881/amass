@@ -110,6 +110,21 @@ type Config struct {
 	// Determines if zone transfers will be attempted
 	Active bool `yaml:"active,omitempty" json:"active,omitempty"`
 
+	// ActiveProxy is the runtime proxy URL through which all -active traffic
+	// (HTTP probes and raw TLS/JARM dials) must egress. Passive traffic (data
+	// sources, general/crawl clients) and all DNS are unaffected and continue
+	// to use the default networking path. Supported schemes: http, https,
+	// socks5, socks5h.
+	ActiveProxy string `yaml:"active_proxy,omitempty" json:"active_proxy,omitempty"`
+
+	// ActiveStrict, when true (the default), makes the engine refuse to start
+	// an active run that has no ActiveProxy configured, so active traffic
+	// cannot egress out of the default network by accident. Set it to false
+	// to allow active traffic over the default egress (for testing, or for a
+	// target that can be probed without the proxy). When an ActiveProxy IS
+	// configured, all active traffic goes through it regardless of this flag.
+	ActiveStrict bool `yaml:"active_strict" json:"active_strict"`
+
 	// Determines rigidness of the enumeration
 	Rigid bool `yaml:"rigid_boundaries" json:"rigid_boundaries"`
 
@@ -209,6 +224,7 @@ func NewConfig() *Config {
 		MinForWordFlip:      2,
 		EditDistance:        1,
 		Recursive:           true,
+		ActiveStrict:        true,
 		MinimumTTL:          1440,
 		ResolversQPS:        DefaultQueriesPerPublicResolver,
 		TrustedQPS:          DefaultQueriesPerBaselineResolver,
@@ -240,6 +256,18 @@ func (c *Config) CheckSettings() error {
 	}
 	if c.Passive && c.Active {
 		return errors.New("active enumeration cannot be performed without DNS resolution")
+	}
+
+	if c.Active {
+		if c.ActiveProxy != "" {
+			if perr := validateActiveProxyURL(c.ActiveProxy); perr != nil {
+				return perr
+			}
+		} else if c.ActiveStrict {
+			return errors.New("active mode is enabled but no active_proxy is configured: " +
+				"set -active-proxy / active_proxy: in the YAML, or pass -active-strict=false " +
+				"to allow active traffic over the default egress (not recommended)")
+		}
 	}
 
 	c.Wordlist, err = ExpandMaskWordlist(c.Wordlist)
@@ -293,6 +321,7 @@ func (c *Config) LoadSettings(path string) error {
 		c.loadTransformSettings,
 		c.loadEngineSettings,
 		c.loadActiveSettings,
+		c.loadActiveProxySettings,
 		c.loadRigidSettings,
 	}
 	for _, load := range loads {

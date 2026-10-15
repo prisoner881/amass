@@ -129,6 +129,14 @@ func (v *V1Handlers) CreateSessionHandler(w http.ResponseWriter, r *http.Request
 		_ = t.Split(k)
 	}
 
+	// Validate active egress + strict policy before session creation so direct
+	// API callers get the same fail-closed enforcement as the enum CLI. JSON
+	// payloads do not pass through LoadSettings, so this is checked here.
+	if err := config.CheckSettings(); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid configuration", err)
+		return
+	}
+
 	sess, err := v.mgr.NewSession(&config)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to create session", err)

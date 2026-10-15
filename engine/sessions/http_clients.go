@@ -13,14 +13,20 @@ import (
 	amassnet "github.com/owasp-amass/amass/v5/internal/net"
 )
 
-// Clients bundles the three clients + transports so you can close idle conns.
+// Clients bundles the per-egress clients + transports so you can close idle
+// conns. The Active client (and its ActiveEgress profile) is built only when
+// the operator supplies an active_proxy; when Active is nil every active-mode
+// call site is expected to fail closed (or, with ActiveStrict off, use the
+// default Probe client).
 type Clients struct {
-	General *http.Client
-	Probe   *http.Client
-	Crawl   *http.Client
-	genTr   *http.Transport
-	probTr  *http.Transport
-	crwlTr  *http.Transport
+	General      *http.Client
+	Probe        *http.Client
+	Crawl        *http.Client
+	Active       *http.Client
+	ActiveEgress *amassnet.ActiveEgress
+	genTr        *http.Transport
+	probTr       *http.Transport
+	crwlTr       *http.Transport
 }
 
 // CloseIdleConnections is useful on session/engine shutdown.
@@ -35,10 +41,14 @@ func (c *Clients) CloseIdleConnections() {
 	if c.crwlTr != nil {
 		c.crwlTr.CloseIdleConnections()
 	}
+	c.ActiveEgress.CloseIdleConnections()
 }
 
-// NewClients returns three tuned clients: API, Probe, Crawl.
-func NewClients(perHost int) (*Clients, error) {
+// NewClients returns the default-egress clients (General, Probe, Crawl) and,
+// when activeProxy is non-empty, the Active client routed through it. An
+// invalid proxy URL is a hard error. When activeProxy is empty no Active
+// client is built and active call sites are expected to fail closed.
+func NewClients(perHost int, activeProxy string) (*Clients, error) {
 	genTr := newGeneralTransport()
 	probTr := newProbeTransport(perHost)
 	crwlTr := newCrawlTransport()
@@ -53,7 +63,12 @@ func NewClients(perHost int) (*Clients, error) {
 		return nil, err
 	}
 
-	return &Clients{
+	active, err := amassnet.NewActiveEgress(activeProxy, 30*time.Second)
+	if err != nil {
+		return nil, err
+	}
+
+	c := &Clients{
 		General: &http.Client{
 			Transport: genTr,
 			Timeout:   1 * time.Minute,
@@ -68,10 +83,15 @@ func NewClients(perHost int) (*Clients, error) {
 			Timeout:   2 * time.Minute,
 			Jar:       cjar,
 		},
-		genTr:  genTr,
-		probTr: probTr,
-		crwlTr: crwlTr,
-	}, nil
+		ActiveEgress: active,
+		genTr:        genTr,
+		probTr:       probTr,
+		crwlTr:       crwlTr,
+	}
+	if active != nil {
+		c.Active = active.Client
+	}
+	return c, nil
 }
 
 func newGeneralTransport() *http.Transport {
