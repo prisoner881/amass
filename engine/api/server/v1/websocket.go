@@ -23,7 +23,7 @@ var upgrader = websocket.Upgrader{
 // WSLogsHandler godoc
 //
 // @Summary      Stream session logs (WebSocket)
-// @Description  Upgrades the HTTP connection to a WebSocket and streams the session's log records as UTF-8 text frames, one JSON object per frame. Only records written while at least one client is connected are delivered; nothing is buffered for later. The server sends a ping every 30 seconds and never reads client messages, so a client must keep reading the connection (which answers the pings). Keep one connection open for the life of the session.
+// @Description  Upgrades the HTTP connection to a WebSocket and streams the session's log records as UTF-8 text frames, one JSON object per frame, in order. Only records written while the client is connected are delivered; nothing is buffered for later. The server sends a ping every 30 seconds and drops a client that has not answered within 60 seconds, so a client must keep reading the connection (which answers the pings). Messages the client sends are ignored. When the session ends, the server sends a close frame.
 // @Tags         sessions
 // @Param        session_token  path  string  true  "Session token (UUID)"
 // @Success      101  "Switching Protocols (WebSocket upgrade)"
@@ -56,33 +56,67 @@ func (v *V1Handlers) WSLogsHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	conn.SetReadLimit(1 << 20)
-	_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+	_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
 	conn.SetPongHandler(func(string) error {
-		_ = conn.SetReadDeadline(time.Now().Add(60 * time.Second))
+		_ = conn.SetReadDeadline(time.Now().Add(wsPongWait))
 		return nil
 	})
 
-	go writeLoop(conn, sess.PubSub().Subscribe())
-	v.log.Info("connected to session log stream")
+	ps := sess.PubSub()
+	ch := ps.Subscribe()
+	end := func() {
+		ps.Unsubscribe(ch)
+		_ = conn.Close()
+	}
+
+	go readLoop(conn, end)
+	go writeLoop(conn, ch, end)
+	if v.log != nil {
+		v.log.Info("connected to session log stream")
+	}
 }
 
-func writeLoop(conn *websocket.Conn, ch <-chan *string) {
-	ping := time.NewTicker(30 * time.Second)
+const (
+	wsPingPeriod = 30 * time.Second
+	wsPongWait   = 60 * time.Second
+	wsWriteWait  = 10 * time.Second
+)
+
+// readLoop reads (and discards) whatever the client sends. Reading is what
+// processes the client's pongs and close frame, so it is how a client that
+// disconnects, or stops answering pings, is noticed: the read fails and the
+// subscription ends at once. Without it, a gone client stayed subscribed for
+// the rest of the session.
+func readLoop(conn *websocket.Conn, end func()) {
+	defer end()
+
+	for {
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+	}
+}
+
+func writeLoop(conn *websocket.Conn, ch <-chan *string, end func()) {
+	defer end()
+
+	ping := time.NewTicker(wsPingPeriod)
 	defer ping.Stop()
 
 	for {
 		select {
 		case msg, ok := <-ch:
-			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
 			if !ok {
-				_ = conn.WriteMessage(websocket.CloseMessage, []byte{})
+				_ = conn.WriteMessage(websocket.CloseMessage,
+					websocket.FormatCloseMessage(websocket.CloseNormalClosure, "session ended"))
 				return
 			}
 			if err := conn.WriteMessage(websocket.TextMessage, []byte(*msg)); err != nil {
 				return
 			}
 		case <-ping.C:
-			_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+			_ = conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
 			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}

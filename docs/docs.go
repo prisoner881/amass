@@ -71,7 +71,7 @@ const docTemplate = `{
         },
         "/sessions": {
             "post": {
-                "description": "Creates a new Amass engine session using the provided configuration JSON. The session does no work until seed assets are posted to /sessions/{session_token}/assets, and its handlers run only for the transformations in the configuration. With active set to true, the request is refused with 400 when no active_proxy is configured and active_strict is not false, and with 500 when the active_proxy cannot be reached or will not relay; the reason is in details.",
+                "description": "Creates a new Amass engine session using the provided configuration JSON. The configuration must include scope. The session does no work until seed assets are posted to /sessions/{session_token}/assets, and its handlers run only for the transformations in the configuration. With active set to true, the request is refused with 400 when no active_proxy is configured and active_strict is not false, and with 500 when the active_proxy cannot be reached or will not relay; the reason is in details.",
                 "consumes": [
                     "application/json"
                 ],
@@ -101,7 +101,7 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Invalid JSON, or invalid configuration (including the active-egress policy)",
+                        "description": "Invalid JSON, or invalid configuration (including a missing scope and the active-egress policy)",
                         "schema": {
                             "$ref": "#/definitions/v1.ErrorResponse"
                         }
@@ -226,7 +226,7 @@ const docTemplate = `{
                         }
                     },
                     "400": {
-                        "description": "Invalid session token, invalid JSON, or invalid asset object",
+                        "description": "Invalid session token, invalid JSON, or invalid asset object (unknown type, or no identifying value such as an FQDN without a name)",
                         "schema": {
                             "$ref": "#/definitions/v1.ErrorResponse"
                         }
@@ -238,7 +238,7 @@ const docTemplate = `{
                         }
                     },
                     "500": {
-                        "description": "Failed to submit the asset",
+                        "description": "Failed to submit the asset; the database's reason is in details",
                         "schema": {
                             "$ref": "#/definitions/v1.ErrorResponse"
                         }
@@ -248,7 +248,7 @@ const docTemplate = `{
         },
         "/sessions/{session_token}/assets/{asset_type}:bulk": {
             "post": {
-                "description": "Submits multiple OAM assets to the session in one request. The asset type is provided in the URL path. Each item in 'items' is a raw OAM JSON object without a 'type' field.",
+                "description": "Submits multiple OAM assets to the session in one request. The asset type is provided in the URL path. Each item in 'items' is a raw OAM JSON object without a 'type' field. Items that do not parse, or have no identifying value, are skipped and not counted; items the database refuses are counted in failed.",
                 "consumes": [
                     "application/json"
                 ],
@@ -524,7 +524,7 @@ const docTemplate = `{
         },
         "/sessions/{session_token}/ws/logs": {
             "get": {
-                "description": "Upgrades the HTTP connection to a WebSocket and streams the session's log records as UTF-8 text frames, one JSON object per frame. Only records written while at least one client is connected are delivered; nothing is buffered for later. The server sends a ping every 30 seconds and never reads client messages, so a client must keep reading the connection (which answers the pings). Keep one connection open for the life of the session.",
+                "description": "Upgrades the HTTP connection to a WebSocket and streams the session's log records as UTF-8 text frames, one JSON object per frame, in order. Only records written while the client is connected are delivered; nothing is buffered for later. The server sends a ping every 30 seconds and drops a client that has not answered within 60 seconds, so a client must keep reading the connection (which answers the pings). Messages the client sends are ignored. When the session ends, the server sends a close frame.",
                 "tags": [
                     "sessions"
                 ],

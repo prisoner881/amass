@@ -166,18 +166,17 @@ How to treat failures:
 
 | Response | Meaning | What to do |
 |---|---|---|
-| 400 `invalid JSON` / `invalid JSON object` / `invalid configuration` | The configuration is malformed or breaks the active-egress policy; `details` says which | Fix the configuration. Do not retry as is. |
+| 400 `invalid JSON` / `invalid JSON object` / `invalid configuration` | The configuration is malformed, has no `scope`, or breaks the active-egress policy; `details` says which | Fix the configuration. Do not retry as is. |
 | 500 `failed to create session`, `details` contains `active proxy ... is not usable` | Active proxy down or refusing to relay | Treat the proxy as down. Do not start enumerations until it is restored. |
 | 500 `failed to create session`, anything else | Engine-side problem (database unreachable, output directory missing, etc.) | Investigate the engine; `details` and the engine log give the reason. |
-| No response (connection closed) | The configuration has no `scope` | Add `scope`. |
 
 ### Step 3: connect to the log stream
 
 Open the WebSocket `GET /api/v1/sessions/{token}/ws/logs` straight away and
 store everything it sends. Session log records are only delivered to clients
-connected at the time; anything logged while nobody is connected is lost. Keep
-**one** connection open for the life of the session (see
-[Known issues](#10-known-issues) for why not to reconnect repeatedly).
+connected at the time; anything logged while nobody is connected is lost. If
+the connection drops, reconnect; the engine stops sending to a client as soon
+as it disconnects.
 
 ### Step 4: submit the seed assets
 
@@ -195,8 +194,8 @@ engine treats as in scope; seeds start the work. A seed that is not also in
 `scope` is processed but is not in scope: for example, an IP posted as an asset
 but missing from `scope.ips` does not appear in `GET /scope/ipaddress`.
 Submit each seed with [`POST /assets/{type}`](#post-sessionstokenassetstype)
-or [`POST /assets/{type}:bulk`](#post-sessionstokenassetstypebulk), and
-**validate every item first** (see [Known issues](#10-known-issues)).
+or [`POST /assets/{type}:bulk`](#post-sessionstokenassetstypebulk), and check
+each response: a bulk request reports how many items it stored.
 
 ### Step 5: monitor until the first pass is idle
 
@@ -266,7 +265,7 @@ engine reads; anything else is ignored.
 
 | Field | Type | Default | Meaning |
 |---|---|---|---|
-| `scope` | object | none | What is in scope. **Required**: a request without it gets no response (see [Known issues](#10-known-issues)). See [scope](#scope). |
+| `scope` | object | none | What is in scope. **Required**: a request without it is refused with 400 (`scope is required`). See [scope](#scope). |
 | `transformations` | object | none | Which handlers run, and for how long their results are reused. **Required in practice**: with no transformations nothing runs. See [transformations](#transformations). |
 | `database` | array | SQLite in the engine's output directory | Where results are stored. See [database](#database). |
 | `datasource_config` | object | none | Data-source credentials and settings. See [data sources](#data-sources). |
@@ -653,13 +652,9 @@ returned `"1"` both times), so retries are safe.
 
 | Status | Body |
 |---|---|
-| 400 | `invalid JSON`, `invalid JSON object`, or `invalid asset object` (e.g. `unknown asset type: autonomous_system`) |
+| 400 | `invalid JSON`, `invalid JSON object`, or `invalid asset object`: an unknown type (`unknown asset type: autonomous_system`) or an asset with no identifying value, such as an `fqdn` without a `name` (`the fqdn asset has no identifying value`) |
 | 404 | `session not found` |
-| 500 | `failed to submit the asset` |
-
-If the asset is well-formed JSON but the database rejects it (for example an
-`fqdn` with no `name`), the engine drops the connection without a response.
-See [Known issues](#10-known-issues).
+| 500 | `failed to submit the asset`, with the database's reason in `details` |
 
 ---
 
@@ -682,11 +677,12 @@ curl -s -X POST "$E/sessions/$T/assets/fqdn:bulk" -H 'Content-Type: application/
 |---|---|
 | `ingested` | Items that parsed as the path's asset type |
 | `stored` | Items stored and started |
-| `failed` | `ingested` minus `stored` |
+| `failed` | `ingested` minus `stored`: items the database refused |
 
-Items that do not parse (for example a string instead of an object) are
-skipped silently and are not counted anywhere. Check that
-`ingested` equals the number of items you sent.
+Items that do not parse (for example a string instead of an object), and items
+with no identifying value (an `fqdn` without a `name`), are skipped silently
+and are not counted anywhere. Check that `ingested` equals the number of items
+you sent, and that `failed` is 0.
 
 | Status | Body |
 |---|---|
@@ -701,10 +697,6 @@ every item is stored. A request cut off by the timeout may still have stored
 some or all of its items; resending is safe because existing assets are
 reused.
 
-**Validate every item before sending.** One item that parses but that the
-database rejects, such as `{"bogus": 1}` sent as an `fqdn`, crashes the whole
-engine. See [Known issues](#10-known-issues).
-
 ---
 
 ### GET /sessions/{token}/ws/logs
@@ -717,16 +709,15 @@ ws://engine-host:4000/api/v1/sessions/<token>/ws/logs
 ```
 
 - Before the upgrade, the usual 404 errors apply.
-- Records are delivered only while the client is connected; nothing is
-  buffered for a later connection.
-- The server sends a ping every 30 seconds and never reads anything the
-  client sends. Keep reading the connection; standard WebSocket clients answer
-  the pings while reading.
-- When the session is terminated, the server sends a close frame, about
-  10 seconds after the `DELETE`.
-- Keep **one** connection per session for its whole life. A disconnected
-  client is never removed on the engine side and makes it leak memory for the
-  rest of the session (see [Known issues](#10-known-issues)).
+- Records are delivered in order, and only while the client is connected;
+  nothing is buffered for a later connection.
+- The server sends a ping every 30 seconds and drops a client that has not
+  answered within 60 seconds. Keep reading the connection; standard WebSocket
+  clients answer pings while reading. Anything the client sends is ignored.
+- A client that disconnects, or is dropped, is unsubscribed at once, so
+  reconnecting is safe. Several clients can watch the same session.
+- When the session is terminated, the server sends a normal close frame
+  (`session ended`), about 10 seconds after the `DELETE`.
 
 ---
 
@@ -818,32 +809,16 @@ results, which are in the database.
 
 ## 10. Known issues
 
-These exist in the code as of `hypermass-1.1` (commit 1f17bec7) and were
-reproduced on a running engine.
-
-1. **A bad item in a bulk request crashes the engine.** If an item parses but
-   the database rejects it (e.g. `{"bogus": 1}` or `{"name": ""}` sent as an
-   `fqdn`), the engine dereferences a nil result in a background goroutine and
-   the whole process exits with a panic, ending its session. The same input to
-   the single-asset endpoint only drops that request's connection. Until
-   fixed: validate every asset before sending (each `fqdn` has a non-empty
-   `name`, each `ipaddress` a valid `address` and `type`, and so on), and treat
-   an engine that stops answering as a failed enumeration.
-2. **Disconnected log-stream clients leak memory.** The engine never removes a
-   log-stream subscriber. After a client disconnects, its queue fills and
-   every later log record leaves a blocked goroutine behind, so memory grows
-   for the rest of the session. Keep one connection per session and do not
-   reconnect in a loop. Replacing the container after each enumeration bounds
-   the damage.
-3. **Wrong methods and malformed tokens return 404**, not 405 or 400 (see
+1. **Wrong methods and malformed tokens return 404**, not 405 or 400 (see
    [Conventions](#3-conventions)).
-4. **Unparseable bulk items are not counted**: they are missing from
-   `ingested` and `failed` alike (see the
+2. **Skipped bulk items are not counted**: items that do not parse, or have no
+   identifying value, are missing from `ingested` and `failed` alike (see the
    [bulk endpoint](#post-sessionstokenassetstypebulk)).
-5. **A session configuration without `scope` gets no response.** Session
-   creation reads the scope's ports without checking that a scope was sent,
-   panics, and the engine drops the connection. The engine itself keeps
-   running. Always send `scope`.
+
+Fixed in this version: a bad item in a bulk request no longer crashes the
+engine, a bad single asset gets an error response instead of a dropped
+connection, a configuration without `scope` gets a 400 instead of no
+response, and disconnected log-stream clients no longer leak memory.
 
 ## Appendix A: default transformations
 

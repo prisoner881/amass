@@ -83,12 +83,17 @@ func (v *V1Handlers) PutAsset(ctx context.Context, sess et.Session, asset oam.As
 
 	var entity *dbt.Entity
 	ents, err := sess.DB().FindEntitiesByContent(ctx, asset.AssetType(), time.Time{}, 1, filter)
-	if err == nil {
+	if err == nil && len(ents) > 0 && ents[0] != nil {
 		entity = ents[0]
 	} else {
+		// CreateAsset returns a nil entity with its error, e.g. when the
+		// database rejects the asset, so never touch entity on that path.
 		entity, err = sess.DB().CreateAsset(ctx, asset)
 		if err != nil {
-			return entity.ID, err
+			return "", err
+		}
+		if entity == nil {
+			return "", errors.New("the database did not return the stored asset")
 		}
 	}
 
@@ -111,6 +116,15 @@ func (v *V1Handlers) PutAssets(ctx context.Context, sess et.Session, assets []oa
 
 	for _, asset := range assets {
 		go func(a oam.Asset) {
+			// These goroutines run outside the HTTP server's per-request panic
+			// recovery, so a panic here would take down the whole engine.
+			// Count it as a failed item instead.
+			defer func() {
+				if r := recover(); r != nil {
+					ch <- fmt.Errorf("panic while storing %s: %v", a.Key(), r)
+				}
+			}()
+
 			_, err := v.PutAsset(ctx, sess, a)
 			ch <- err
 		}(asset)
@@ -124,13 +138,27 @@ func (v *V1Handlers) PutAssets(ctx context.Context, sess et.Session, assets []oa
 	}
 	close(ch)
 
-	if failed != 0 {
+	if failed != 0 && v.log != nil {
 		v.log.Warn("some assets failed to ingest", "failed", failed, "total", len(assets))
 	}
 	return int64(len(assets)) - failed, nil
 }
 
+// parseAsset decodes raw as an asset of type atype and rejects one with no
+// identifying value, such as an FQDN without a name. The database would
+// refuse to store it anyway; rejecting it here gives the caller a 400.
 func parseAsset(atype string, raw json.RawMessage) (oam.Asset, error) {
+	a, err := decodeAsset(atype, raw)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(a.Key()) == "" {
+		return nil, fmt.Errorf("the %s asset has no identifying value", atype)
+	}
+	return a, nil
+}
+
+func decodeAsset(atype string, raw json.RawMessage) (oam.Asset, error) {
 	switch atype {
 	case strings.ToLower(string(oam.Account)):
 		var a oamacct.Account
